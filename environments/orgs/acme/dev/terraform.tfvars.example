@@ -1,0 +1,6 @@
+# Valores para acme / dev — copiar a terraform.tfvars
+
+org_slug    = "acme"
+environment = "dev"
+aws_region  = "sa-east-1"
+tags        = {}

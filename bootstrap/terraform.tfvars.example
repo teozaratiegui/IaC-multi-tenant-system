@@ -1,0 +1,5 @@
+# Copy to terraform.tfvars and set your bucket/table names (must be globally unique)
+aws_region         = "sa-east-1"
+state_bucket_name  = "mycompany-terraform-state-dev"
+lock_table_name   = "mycompany-terraform-lock-dev"
+tags = {}
