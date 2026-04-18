@@ -1,6 +1,6 @@
 # -----------------------------------------------------------------------------
 # Bootstrap: run this ONCE with local state to create the S3 + DynamoDB backend.
-# Then configure your environments to use that backend.
+# Then configure your orgs/ deployment roots to use that backend.
 # Usage: terraform init && terraform apply
 # -----------------------------------------------------------------------------
 

@@ -1,0 +1,8 @@
+# Copy to backend.hcl and set bucket + dynamodb_table (from bootstrap outputs).
+# Then: terraform init -backend-config=backend.hcl
+
+key            = "orgs/acme/access-control/dev/terraform.tfstate"
+bucket         = "YOUR-TERRAFORM-STATE-BUCKET"
+region         = "sa-east-1"
+dynamodb_table = "YOUR-LOCK-TABLE-NAME"
+encrypt        = true

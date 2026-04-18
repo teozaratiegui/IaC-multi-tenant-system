@@ -1,2 +1,3 @@
 build/
 lambdas/access_control/node_modules/
+lambdas/access_control/.env
