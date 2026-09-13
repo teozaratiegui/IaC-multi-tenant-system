@@ -8,11 +8,11 @@
  * whose variables were changed underneath a warm container fails loudly on the
  * next call instead of serving a stale config.
  *
- * The three handlers share one package but not one environment — Terraform
- * gives each function only the variables it needs (CONTRACT.md §2). So
- * validation is per handler: demanding EVENTS_TABLE_NAME from associate-tag,
- * which is never given one, would make a correct deployment fail at the first
- * invoke.
+ * `loadConfig` knows this use case's variables; `validateConfig` does not, and
+ * takes the requirements from its caller. The three handlers share one package
+ * but not one environment — Terraform gives each function only the variables it
+ * needs (CONTRACT.md §2) — so each declares what it cannot run without, next to
+ * the code that uses it.
  */
 
 const TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
@@ -31,27 +31,6 @@ const DEFAULT_TIMEZONE = 'America/Argentina/Buenos_Aires';
  * (finding G3), and erring towards a shorter window only costs duplicate rows.
  */
 const MAX_DEDUP_WINDOW_MS = 5000;
-
-/** What each handler cannot run without, keyed by the name its file uses. */
-const REQUIREMENTS = {
-  'tag-scan': ['tagsTable', 'eventsTable', 'apiKeyParameterName'],
-  'associate-tag': ['tagsTable', 'apiKeyParameterName'],
-  // The webhook secret is listed because it is the *only* thing authenticating
-  // this endpoint: no x-api-key, a public Function URL, and a sender id the body
-  // declares about itself. Without it the adapter refuses every request, which is
-  // the right failure — but it surfaces as an opaque 500 on the first inbound
-  // message instead of the explicit misconfiguration log the other two handlers
-  // get. CONTRACT.md §2 has always marked it required.
-  webhook: ['tagsTable', 'messagingTokenParameterName', 'webhookSecretParameterName'],
-};
-
-const LABELS = {
-  tagsTable: 'TAGS_TABLE_NAME',
-  eventsTable: 'EVENTS_TABLE_NAME',
-  apiKeyParameterName: 'API_KEY_PARAMETER_NAME',
-  messagingTokenParameterName: 'MESSAGING_TOKEN_PARAMETER_NAME',
-  webhookSecretParameterName: 'WEBHOOK_SECRET_PARAMETER_NAME',
-};
 
 function asBoolean(value, fallback = false) {
   if (value === undefined || value === '') return fallback;
@@ -112,17 +91,19 @@ function messagingEnabled(config) {
   return config.messagingProvider !== 'none' && config.messagingProvider !== '';
 }
 
-/** Returns the list of problems that make this handler's deployment unusable. */
-function validateConfig(config, handlerName) {
-  const required = REQUIREMENTS[handlerName];
-  if (!required) throw new Error(`Unknown handler for config validation: ${handlerName}`);
-
+/**
+ * Returns the list of problems that make a deployment unusable.
+ *
+ * `requirements` maps each config field the caller cannot run without to the
+ * environment variable that sets it, so an operator reading the log is told the
+ * name they have to fix rather than an internal field name. Handlers pass their
+ * own, which is also why a misspelled handler name is no longer a failure mode:
+ * there is nothing left to look up.
+ */
+function validateConfig(config, requirements) {
   const problems = [];
-  for (const field of required) {
-    if (!asString(config[field])) problems.push(`${LABELS[field]} is not set`);
-  }
-  if (handlerName === 'webhook' && !messagingEnabled(config)) {
-    problems.push('MESSAGING_PROVIDER is not set');
+  for (const [field, label] of Object.entries(requirements)) {
+    if (!asString(config[field])) problems.push(`${label} is not set`);
   }
   return problems;
 }

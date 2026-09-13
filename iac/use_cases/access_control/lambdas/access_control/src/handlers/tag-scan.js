@@ -23,6 +23,13 @@ const { SSMClient } = require('@aws-sdk/client-ssm');
 const { SsmParameterReader } = require('../platform/ssm-parameter');
 const { ApiKeyVerifier } = require('../platform/api-key');
 const { loadConfig, validateConfig } = require('../platform/config');
+
+/** What this handler cannot run without, mapped to the variable that sets it. */
+const REQUIREMENTS = {
+  tagsTable: 'TAGS_TABLE_NAME',
+  eventsTable: 'EVENTS_TABLE_NAME',
+  apiKeyParameterName: 'API_KEY_PARAMETER_NAME',
+};
 const { response, header, parseBody } = require('../platform/http');
 const { STATUS } = require('../domain/decisions');
 const { normaliseTag } = require('../domain/event');
@@ -52,7 +59,7 @@ function getVerifier(parameterName) {
 exports.handler = async (event) => {
   const config = loadConfig();
 
-  const problems = validateConfig(config, 'tag-scan');
+  const problems = validateConfig(config, REQUIREMENTS);
   if (problems.length > 0) {
     console.error('Misconfigured deployment:', problems.join('; '));
     return response(STATUS.INTERNAL_ERROR, { error: 'Internal Server Error' });

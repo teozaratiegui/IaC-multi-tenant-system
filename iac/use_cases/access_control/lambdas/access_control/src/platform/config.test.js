@@ -2,6 +2,24 @@
 
 const { loadConfig, validateConfig, MAX_DEDUP_WINDOW_MS } = require('./config');
 
+// The same tables the handlers declare. Kept here rather than imported so a
+// handler that quietly drops a requirement shows up as a failure, not as two
+// copies of the same mistake agreeing with each other.
+const SCAN_REQUIREMENTS = {
+  tagsTable: 'TAGS_TABLE_NAME',
+  eventsTable: 'EVENTS_TABLE_NAME',
+  apiKeyParameterName: 'API_KEY_PARAMETER_NAME',
+};
+const ASSOCIATE_REQUIREMENTS = {
+  tagsTable: 'TAGS_TABLE_NAME',
+  apiKeyParameterName: 'API_KEY_PARAMETER_NAME',
+};
+const WEBHOOK_REQUIREMENTS = {
+  tagsTable: 'TAGS_TABLE_NAME',
+  messagingTokenParameterName: 'MESSAGING_TOKEN_PARAMETER_NAME',
+  webhookSecretParameterName: 'WEBHOOK_SECRET_PARAMETER_NAME',
+};
+
 const SCAN_ENV = {
   TAGS_TABLE_NAME: 'acme-dev-tags',
   EVENTS_TABLE_NAME: 'acme-dev-events',
@@ -50,7 +68,7 @@ describe('messaging configuration', () => {
     const config = loadConfig(SCAN_ENV);
     expect(config.messagingProvider).toBe('none');
     expect(config.messagingTokenParameterName).toBe('');
-    expect(validateConfig(config, 'tag-scan')).toEqual([]);
+    expect(validateConfig(config, SCAN_REQUIREMENTS)).toEqual([]);
   });
 
   test('the provider name is normalised', () => {
@@ -98,18 +116,18 @@ describe('presentation configuration', () => {
 
 describe('validateConfig', () => {
   test('a complete tag-scan environment has no problems', () => {
-    expect(validateConfig(loadConfig(SCAN_ENV), 'tag-scan')).toEqual([]);
+    expect(validateConfig(loadConfig(SCAN_ENV), SCAN_REQUIREMENTS)).toEqual([]);
   });
 
   test('every missing variable is reported, not just the first', () => {
-    expect(validateConfig(loadConfig({}), 'tag-scan')).toHaveLength(3);
+    expect(validateConfig(loadConfig({}), SCAN_REQUIREMENTS)).toHaveLength(3);
   });
 
   test('each handler only requires what its own Terraform grants it', () => {
     // associate-tag gets no EVENTS_TABLE_NAME and the webhook gets no API key;
     // demanding them would make a correct deployment fail at the first invoke.
     const associateEnv = { TAGS_TABLE_NAME: 't', API_KEY_PARAMETER_NAME: '/k' };
-    expect(validateConfig(loadConfig(associateEnv), 'associate-tag')).toEqual([]);
+    expect(validateConfig(loadConfig(associateEnv), ASSOCIATE_REQUIREMENTS)).toEqual([]);
 
     const webhookEnv = {
       TAGS_TABLE_NAME: 't',
@@ -117,11 +135,11 @@ describe('validateConfig', () => {
       MESSAGING_TOKEN_PARAMETER_NAME: '/acme/dev/access-control/messaging-token',
       WEBHOOK_SECRET_PARAMETER_NAME: '/acme/dev/access-control/webhook-secret',
     };
-    expect(validateConfig(loadConfig(webhookEnv), 'webhook')).toEqual([]);
+    expect(validateConfig(loadConfig(webhookEnv), WEBHOOK_REQUIREMENTS)).toEqual([]);
   });
 
   test('the webhook is unusable without a provider and a token', () => {
-    const problems = validateConfig(loadConfig({ TAGS_TABLE_NAME: 't' }), 'webhook');
+    const problems = validateConfig(loadConfig({ TAGS_TABLE_NAME: 't' }), WEBHOOK_REQUIREMENTS);
     expect(problems.length).toBeGreaterThan(0);
   });
 
@@ -135,12 +153,17 @@ describe('validateConfig', () => {
         MESSAGING_PROVIDER: 'telegram',
         MESSAGING_TOKEN_PARAMETER_NAME: '/acme/dev/access-control/messaging-token',
       }),
-      'webhook',
+      WEBHOOK_REQUIREMENTS,
     );
     expect(problems).toEqual(['WEBHOOK_SECRET_PARAMETER_NAME is not set']);
   });
 
-  test('an unknown handler name is a programming error', () => {
-    expect(() => validateConfig(loadConfig(SCAN_ENV), 'nope')).toThrow();
+  test('the validator knows nothing about this use case', () => {
+    // It reports whatever the caller asked for, which is what lets a second use
+    // case reuse it: the field names and the variable names are both the
+    // caller's. A misspelled handler name used to be a failure mode here and is
+    // no longer reachable — there is nothing left to look up.
+    const problems = validateConfig({ somethingElse: '' }, { somethingElse: 'SOMETHING_ELSE' });
+    expect(problems).toEqual(['SOMETHING_ELSE is not set']);
   });
 });

@@ -25,7 +25,19 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { SSMClient } = require('@aws-sdk/client-ssm');
 
 const { SsmParameterReader } = require('../platform/ssm-parameter');
-const { loadConfig, validateConfig } = require('../platform/config');
+const { loadConfig, validateConfig, messagingEnabled } = require('../platform/config');
+
+// The webhook secret is listed because it is the *only* thing authenticating
+// this endpoint: no x-api-key, a public Function URL, and a sender id the body
+// declares about itself. Without it the adapter refuses every request, which is
+// the right failure — but it surfaces as an opaque 500 on the first inbound
+// message instead of the explicit misconfiguration log the other two handlers
+// get. CONTRACT.md §2 has always marked it required.
+const REQUIREMENTS = {
+  tagsTable: 'TAGS_TABLE_NAME',
+  messagingTokenParameterName: 'MESSAGING_TOKEN_PARAMETER_NAME',
+  webhookSecretParameterName: 'WEBHOOK_SECRET_PARAMETER_NAME',
+};
 const { response, httpMethod } = require('../platform/http');
 const { STATUS } = require('../domain/decisions');
 const { createMessages } = require('../domain/messages');
@@ -40,7 +52,10 @@ const parameters = new SsmParameterReader(ssm);
 exports.handler = async (event) => {
   const config = loadConfig();
 
-  const problems = validateConfig(config, 'webhook');
+  // Not part of REQUIREMENTS: loadConfig defaults the provider to the string
+  // 'none', which is present but unusable, so the emptiness check cannot see it.
+  const problems = validateConfig(config, REQUIREMENTS);
+  if (!messagingEnabled(config)) problems.push('MESSAGING_PROVIDER is not set');
   if (problems.length > 0) {
     console.error('Misconfigured deployment:', problems.join('; '));
     return response(STATUS.INTERNAL_ERROR, { error: 'Internal Server Error' });

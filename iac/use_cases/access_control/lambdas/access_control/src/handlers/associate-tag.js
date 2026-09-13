@@ -33,6 +33,13 @@ const { SSMClient } = require('@aws-sdk/client-ssm');
 const { SsmParameterReader } = require('../platform/ssm-parameter');
 const { ApiKeyVerifier } = require('../platform/api-key');
 const { loadConfig, validateConfig } = require('../platform/config');
+
+// No EVENTS_TABLE_NAME: Terraform never grants this function one, so demanding
+// it would make a correct deployment fail at the first invoke (CONTRACT.md §2).
+const REQUIREMENTS = {
+  tagsTable: 'TAGS_TABLE_NAME',
+  apiKeyParameterName: 'API_KEY_PARAMETER_NAME',
+};
 const { response, header, parseBody } = require('../platform/http');
 const { STATUS } = require('../domain/decisions');
 const { DynamoTagRepository } = require('../adapters/dynamo/tag-repository');
@@ -57,7 +64,7 @@ function getVerifier(parameterName) {
 exports.handler = async (event) => {
   const config = loadConfig();
 
-  const problems = validateConfig(config, 'associate-tag');
+  const problems = validateConfig(config, REQUIREMENTS);
   if (problems.length > 0) {
     console.error('Misconfigured deployment:', problems.join('; '));
     return response(STATUS.INTERNAL_ERROR, { error: 'Internal Server Error' });
