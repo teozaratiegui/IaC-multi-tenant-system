@@ -15,6 +15,7 @@ variable "lock_table_name" {
 }
 
 variable "tags" {
+  description = "Tags applied to the state bucket and the lock table"
   type        = map(string)
   default     = {}
 }

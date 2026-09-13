@@ -1,6 +1,28 @@
-# Valores para acme / dev — copiar a terraform.tfvars
+# Values for acme / access-control / dev — copy to terraform.tfvars
 
 org_slug    = "acme"
 environment = "dev"
 aws_region  = "sa-east-1"
-tags        = {}
+
+# Requires the tenant root to list "access-control" in messaging_use_cases: that
+# is what creates the bot token and the webhook secret this reads, under
+# /acme/dev/access-control/.
+enable_messaging   = true
+messaging_provider = "telegram"
+
+# How the messages to owners read. The defaults reproduce what was deployed.
+org_display_name   = "acme"
+messaging_locale   = "es-AR"
+messaging_timezone = "America/Argentina/Buenos_Aires"
+
+# Development convenience: register any unknown tag as allowed on first sight.
+# Leave false unless bringing a bench up — it opens the door to every tag, and it
+# is also what grants the function PutItem on the tags table.
+auto_register_tags = false
+
+log_retention_days = 7
+
+# Point-in-time recovery on both DynamoDB tables. Costs money; off by default.
+point_in_time_recovery = false
+
+tags = {}

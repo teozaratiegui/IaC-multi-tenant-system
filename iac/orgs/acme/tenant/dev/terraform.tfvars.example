@@ -1,0 +1,20 @@
+# Values for acme / dev — copy to terraform.tfvars
+
+org_slug    = "acme"
+environment = "dev"
+aws_region  = "sa-east-1"
+
+# Use cases that need a bot of their own. Each one gets its own token and its own
+# webhook secret under /acme/dev/<slug>/, so a second use case can sit on a
+# different provider without fighting this one over a shared credential. Both are
+# created empty here and filled in out of band — see
+# `terraform output parameters_to_set`.
+#
+# The slug has to match what the use-case root reads. Leave it out and that root
+# fails at plan time, which is the intended way to notice.
+messaging_use_cases = ["access-control"]
+
+# Which provider each one uses is NOT set here: it is a variable of the use-case
+# root. Naming it twice is how the two drift apart.
+
+tags = {}

@@ -1,16 +1,19 @@
 {
   "name": "access-control",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Access-control use case: decides whether a tag may pass, records the scan, alerts the owner and answers the bot",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "test": "jest --config jest.config.js",
+    "test:watch": "jest --config jest.config.js --watch",
     "test:integration": "node integration-test.js"
   },
-  "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.600.0",
-    "@aws-sdk/client-ssm": "^3.600.0"
-  },
   "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/client-ssm": "^3.600.0",
     "dotenv": "^16.4.5",
     "jest": "^29.7.0"
   }

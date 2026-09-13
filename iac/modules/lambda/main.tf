@@ -1,10 +1,13 @@
 # -----------------------------------------------------------------------------
-# Lambda Function Module
-# Creates a Lambda function with configurable runtime, env vars, and permissions
+# Lambda function — the pieces that are identical for every use case.
+#
+# The function, its role, its log group and the cost guardrail live here because
+# they are the same everywhere. What *differs* between use cases — which AWS
+# resources the code touches, and with which actions — arrives as data, in
+# `policy_statements`. The module used to guess instead: one optional variable per
+# AWS service, each with a hardcoded action list. That is why the access-control
+# function could `Scan` and `DeleteItem` on tables it only ever reads and appends.
 # -----------------------------------------------------------------------------
-
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
 
 resource "aws_iam_role" "lambda" {
   name = "${var.function_name}-role"
@@ -13,11 +16,9 @@ resource "aws_iam_role" "lambda" {
     Version = "2012-10-17"
     Statement = [
       {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "lambda.amazonaws.com"
-        }
+        Action    = "sts:AssumeRole"
+        Effect    = "Allow"
+        Principal = { Service = "lambda.amazonaws.com" }
       }
     ]
   })
@@ -30,18 +31,23 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+# Declared rather than left to Lambda: see the note on var.log_retention_days.
+# The name is the one Lambda would use itself — any other and the function writes
+# to a second, unmanaged group.
+resource "aws_cloudwatch_log_group" "lambda" {
+  name              = "/aws/lambda/${var.function_name}"
+  retention_in_days = var.log_retention_days
+  tags              = var.tags
+}
+
 resource "aws_lambda_function" "this" {
   function_name = var.function_name
   role          = aws_iam_role.lambda.arn
   handler       = var.handler
   runtime       = var.runtime
 
-  filename         = var.source_path != null ? var.source_path : null
-  source_code_hash = var.source_path != null ? filebase64sha256(var.source_path) : null
-
-  s3_bucket         = var.s3_bucket
-  s3_key            = var.s3_key
-  s3_object_version = var.s3_object_version
+  filename         = var.source_path
+  source_code_hash = var.source_code_hash
 
   timeout     = var.timeout
   memory_size = var.memory_size
@@ -50,106 +56,58 @@ resource "aws_lambda_function" "this" {
     variables = var.environment_variables
   }
 
-  dynamic "vpc_config" {
-    for_each = var.subnet_ids != null && var.security_group_ids != null ? [1] : []
-    content {
-      subnet_ids         = var.subnet_ids
-      security_group_ids = var.security_group_ids
-    }
-  }
+  tags = merge(var.tags, { Name = var.function_name })
 
-  tags = merge(var.tags, {
-    Name = var.function_name
-  })
+  # Without this the function can race its own log group and create the
+  # unmanaged one first.
+  depends_on = [aws_cloudwatch_log_group.lambda]
 }
 
-# Optional: grant this Lambda permission to access specific DynamoDB tables
-resource "aws_iam_role_policy" "dynamodb" {
-  count = length(var.dynamodb_table_arns) > 0 ? 1 : 0
+resource "aws_iam_role_policy" "permissions" {
+  count = length(var.policy_statements) > 0 ? 1 : 0
 
-  name   = "${var.function_name}-dynamodb"
-  role   = aws_iam_role.lambda.id
+  name = "${var.function_name}-permissions"
+  role = aws_iam_role.lambda.id
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "dynamodb:GetItem",
-          "dynamodb:PutItem",
-          "dynamodb:UpdateItem",
-          "dynamodb:DeleteItem",
-          "dynamodb:BatchGetItem",
-          "dynamodb:BatchWriteItem",
-          "dynamodb:Query",
-          "dynamodb:Scan",
-          "dynamodb:ConditionCheckItem"
-        ]
-        Resource = var.dynamodb_table_arns
-      }
-    ]
-  })
-}
-
-# Optional: grant this Lambda permission to read Secrets Manager secrets (e.g. DB credentials)
-resource "aws_iam_role_policy" "secrets" {
-  count = length(var.secrets_manager_arns) > 0 ? 1 : 0
-
-  name   = "${var.function_name}-secrets"
-  role   = aws_iam_role.lambda.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
+      for statement in var.policy_statements : {
+        Sid      = statement.sid
         Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = var.secrets_manager_arns
+        Action   = statement.actions
+        Resource = statement.resources
       }
     ]
   })
 }
 
-# Optional: grant this Lambda permission to read SSM Parameter Store (Standard tier = free)
-resource "aws_iam_role_policy" "ssm" {
-  count = length(var.ssm_parameter_arns) > 0 ? 1 : 0
-
-  name   = "${var.function_name}-ssm"
-  role   = aws_iam_role.lambda.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["ssm:GetParameter", "ssm:GetParameters"]
-        Resource = var.ssm_parameter_arns
-      }
-    ]
-  })
-}
-
-# Deny costly/dangerous actions so use cases cannot incur unexpected charges (default: enabled)
+# FinOps guardrail: even with a compromised function, these cannot be called.
+#
+# Two things to know before adding a use case:
+#   - a Deny always beats an Allow, so DenyS3Write below will break the first use
+#     case that legitimately writes to S3. Narrow it to specific buckets then,
+#     rather than removing the guardrail;
+#   - ec2:* is denied, which is also why this module no longer offers a VPC
+#     config: attaching an ENI needs ec2:CreateNetworkInterface, so the two
+#     features could never have worked together.
 resource "aws_iam_role_policy" "deny_costly" {
   count = var.deny_costly_actions ? 1 : 0
 
-  name   = "${var.function_name}-deny-costly"
-  role   = aws_iam_role.lambda.id
+  name = "${var.function_name}-deny-costly"
+  role = aws_iam_role.lambda.id
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "DenyEC2"
-        Effect = "Deny"
-        Action = ["ec2:*"]
+        Sid      = "DenyCompute"
+        Effect   = "Deny"
+        Action   = ["ec2:*", "rds:*", "eks:*", "ecs:*"]
         Resource = ["*"]
       },
       {
-        Sid    = "DenyRDS"
-        Effect = "Deny"
-        Action = ["rds:*"]
-        Resource = ["*"]
-      },
-      {
-        Sid    = "DenyLambdaCreate"
+        Sid    = "DenyInfraMutation"
         Effect = "Deny"
         Action = [
           "lambda:CreateFunction",
@@ -157,15 +115,6 @@ resource "aws_iam_role_policy" "deny_costly" {
           "lambda:UpdateFunctionConfiguration",
           "lambda:DeleteFunction",
           "lambda:CreateEventSourceMapping",
-          "lambda:CreateAlias",
-          "lambda:PublishVersion"
-        ]
-        Resource = ["*"]
-      },
-      {
-        Sid    = "DenyDynamoDBCreateDelete"
-        Effect = "Deny"
-        Action = [
           "dynamodb:CreateTable",
           "dynamodb:DeleteTable",
           "dynamodb:UpdateTable"
@@ -173,21 +122,9 @@ resource "aws_iam_role_policy" "deny_costly" {
         Resource = ["*"]
       },
       {
-        Sid    = "DenyS3Write"
-        Effect = "Deny"
-        Action = [
-          "s3:CreateBucket",
-          "s3:PutObject",
-          "s3:PutObjectAcl",
-          "s3:DeleteBucket",
-          "s3:DeleteObject"
-        ]
-        Resource = ["*"]
-      },
-      {
-        Sid    = "DenyEKSECS"
-        Effect = "Deny"
-        Action = ["eks:*", "ecs:*", "ecr:PutImage", "ecr:InitiateLayerUpload"]
+        Sid      = "DenyS3Write"
+        Effect   = "Deny"
+        Action   = ["s3:CreateBucket", "s3:PutObject", "s3:DeleteBucket", "s3:DeleteObject"]
         Resource = ["*"]
       }
     ]

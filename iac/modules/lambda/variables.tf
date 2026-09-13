@@ -4,38 +4,28 @@ variable "function_name" {
 }
 
 variable "handler" {
-  description = "Lambda handler (e.g. index.handler)"
+  description = "Lambda handler, e.g. src/handlers/tagScan.handler"
   type        = string
 }
 
 variable "runtime" {
-  description = "Lambda runtime (e.g. nodejs20.x, python3.12)"
+  description = "Lambda runtime (e.g. nodejs20.x)"
   type        = string
+  default     = "nodejs20.x"
 }
 
-# Source: either local file or S3
 variable "source_path" {
-  description = "Path to the deployment package (zip). Use this OR s3_bucket/s3_key."
+  description = "Path to the deployment package (zip)"
   type        = string
-  default     = null
 }
 
-variable "s3_bucket" {
-  description = "S3 bucket containing the deployment package"
+variable "source_code_hash" {
+  description = <<-EOT
+    Base64 SHA-256 of the package, so a code change redeploys the function. Pass
+    `data.archive_file.<x>.output_base64sha256` rather than letting the module read
+    the file off disk: it makes the dependency on the archive explicit.
+  EOT
   type        = string
-  default     = null
-}
-
-variable "s3_key" {
-  description = "S3 key of the deployment package"
-  type        = string
-  default     = null
-}
-
-variable "s3_object_version" {
-  description = "S3 object version of the deployment package"
-  type        = string
-  default     = null
 }
 
 variable "timeout" {
@@ -51,49 +41,48 @@ variable "memory_size" {
 }
 
 variable "environment_variables" {
-  description = "Environment variables for the Lambda"
+  description = "Environment variables for the function"
   type        = map(string)
   default     = {}
 }
 
-variable "subnet_ids" {
-  description = "Subnet IDs for VPC config (optional)"
-  type        = list(string)
-  default     = null
+variable "policy_statements" {
+  description = <<-EOT
+    The permissions this function needs, declared by whoever knows what it calls —
+    the use case, not this module. Replaces the old one-variable-per-AWS-service
+    shape (`dynamodb_table_arns`, `ssm_parameter_arns`, …), which forced a fixed
+    action list per service and made least privilege something you had to remember
+    rather than something the design produced. A use case that needs SQS or S3 now
+    needs no change here.
+  EOT
+  type = list(object({
+    sid       = string
+    actions   = list(string)
+    resources = list(string)
+  }))
+  default = []
 }
 
-variable "security_group_ids" {
-  description = "Security group IDs for VPC config (optional)"
-  type        = list(string)
-  default     = null
-}
-
-variable "dynamodb_table_arns" {
-  description = "ARNs of DynamoDB tables this Lambda can access (grants read/write)"
-  type        = list(string)
-  default     = []
-}
-
-variable "secrets_manager_arns" {
-  description = "ARNs of Secrets Manager secrets this Lambda can read (e.g. DB credentials)"
-  type        = list(string)
-  default     = []
-}
-
-variable "ssm_parameter_arns" {
-  description = "ARNs of SSM Parameter Store parameters this Lambda can read (Standard tier is free)"
-  type        = list(string)
-  default     = []
+variable "log_retention_days" {
+  description = <<-EOT
+    Retention of the function's CloudWatch log group. The group is declared here on
+    purpose: left to Lambda, it is created outside Terraform with retention "never
+    expire", `destroy` leaves it orphaned, and the reproducibility claim gets a
+    silent exception. Verified twice in this account.
+    Note this caps storage only — log *ingestion* is billed either way.
+  EOT
+  type        = number
+  default     = 7
 }
 
 variable "deny_costly_actions" {
-  description = "If true, attach a policy that Denies EC2, RDS, Lambda create/update, DynamoDB create/delete table, S3 write, EKS/ECS so use cases cannot incur unexpected charges"
+  description = "Attach a Deny policy for expensive services so a use case cannot run up a bill"
   type        = bool
   default     = true
 }
 
 variable "tags" {
-  description = "Tags to apply to the Lambda and its role"
+  description = "Tags to apply to the function, its role and its log group"
   type        = map(string)
   default     = {}
 }
