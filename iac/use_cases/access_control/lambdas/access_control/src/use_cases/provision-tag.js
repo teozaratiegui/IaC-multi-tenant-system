@@ -39,6 +39,16 @@ class ProvisionTagUseCase {
     const tagId = String(input.tag ?? '').trim();
     if (!tagId) return badRequest('Campo requerido: tag');
 
+    // Rejected, never coerced. `Boolean('false')` is true, so coercing meant a
+    // client that serialises booleans as strings created *enabled* the tag the
+    // operator meant to block — and said 201 while doing it. Validating instead
+    // of guessing is also what keeps this file free of `platform/`: the use case
+    // is not allowed to import the config layer's asBoolean, and it should not
+    // grow a private copy of it either.
+    if (input.allowed !== undefined && typeof input.allowed !== 'boolean') {
+      return badRequest('Campo `allowed` debe ser un booleano (true o false), sin comillas');
+    }
+
     // Either no association at all, or a complete one. Half of it would create
     // an item that is invisible in the chat index.
     let association;
@@ -65,7 +75,7 @@ class ProvisionTagUseCase {
 
     const outcome = await this.tags.provision({
       tagId,
-      allowed: input.allowed === undefined ? true : Boolean(input.allowed),
+      allowed: input.allowed ?? true,
       registeredAt: this.now().toISOString(),
       association,
     });

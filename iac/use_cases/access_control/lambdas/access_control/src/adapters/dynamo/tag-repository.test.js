@@ -175,6 +175,17 @@ describe('provision', () => {
     ).toBe('exists');
   });
 
+  test('any other failure propagates — only the conditional check is an outcome', async () => {
+    // The catch is there to turn one specific DynamoDB error into a domain
+    // outcome. Everything else — throttling, a denied IAM policy, a table that
+    // is not there — has to reach the handler and become a 500. Swallowing it
+    // would answer 201 for a tag that was never written.
+    const dynamo = { send: jest.fn().mockRejectedValue(new Error('ProvisionedThroughputExceeded')) };
+    await expect(
+      new DynamoTagRepository(dynamo, TABLE).provision({ tagId: 'E280', allowed: true }),
+    ).rejects.toThrow('ProvisionedThroughputExceeded');
+  });
+
   test('an optional association is written in the same item, both attributes', async () => {
     // Provisioning and binding in one call is the real operator gesture:
     // a new bike gets its tag and its owner at the same time.

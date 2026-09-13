@@ -38,6 +38,29 @@ describe('provisioning a tag', () => {
     expect(tagRepository.provision.mock.calls[0][0].allowed).toBe(false);
   });
 
+  test('400 when `allowed` is not a boolean — never coerced open', async () => {
+    // Boolean('false') is true. Coercing meant that any client serialising
+    // booleans as strings — curl, a form post, Postman — created *enabled* the
+    // very tag the operator meant to block, and nothing said so. Same class of
+    // defect as the ENVIRONMENT-implied AUTO_REGISTER_TAGS this repo already
+    // fixed once: a value that is not understood must not fail open.
+    for (const allowed of ['false', 'true', 0, 1, 'no', null, {}]) {
+      const tagRepository = makeRepository();
+      const result = await run(tagRepository, { tag: 'E280', allowed });
+
+      expect(result.status).toBe(400);
+      expect(result.body.message).toMatch(/allowed/);
+      expect(tagRepository.provision).not.toHaveBeenCalled();
+    }
+  });
+
+  test('omitting `allowed` still means allowed — undefined is not a bad value', async () => {
+    const tagRepository = makeRepository();
+    const result = await run(tagRepository, { tag: 'E280', allowed: undefined });
+    expect(result.status).toBe(201);
+    expect(tagRepository.provision.mock.calls[0][0].allowed).toBe(true);
+  });
+
   test('409 when the tag already exists — never a silent overwrite', async () => {
     const result = await run(makeRepository('exists'), { tag: 'E280' });
     expect(result.status).toBe(409);

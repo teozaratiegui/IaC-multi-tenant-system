@@ -219,4 +219,27 @@ describe('configuration', () => {
     const handler = await loadHandler({ MESSAGING_PROVIDER: '' });
     expect((await handler(update())).statusCode).toBe(500);
   });
+
+  test('an unsupported messaging provider fails closed, not silently', async () => {
+    // tag-scan has had this test; the webhook is the endpoint where it matters
+    // more, because a provider name the registry does not know means there is no
+    // inbound adapter — and therefore no verification. Answering anything but
+    // 500 would be running an unauthenticated command.
+    const handler = await loadHandler({ ...TELEGRAM_ENV, MESSAGING_PROVIDER: 'signal' });
+    const result = await handler(update());
+
+    expect(result.statusCode).toBe(500);
+    expect(mockDynamoSend).not.toHaveBeenCalled();
+  });
+
+  test('500 when the webhook secret was never wired up', async () => {
+    // The secret is the only thing authenticating this endpoint: no x-api-key,
+    // a public Function URL, a sender id the body declares about itself. A
+    // deployment missing it must refuse, and say which variable is missing.
+    const handler = await loadHandler({
+      ...TELEGRAM_ENV,
+      WEBHOOK_SECRET_PARAMETER_NAME: '',
+    });
+    expect((await handler(update())).statusCode).toBe(500);
+  });
 });

@@ -45,7 +45,7 @@ function makeUseCase({ tagRepository, eventRepository, messenger, config = {} })
     eventRepository,
     messenger: messenger ?? makeMessenger('none', { success: false }),
     messages: MESSAGES,
-    config: { autoRegisterTags: false, dedupWindowMs: 0, ...config },
+    config: { autoRegisterTags: false, ...config },
     now: () => FIXED_NOW,
   });
 }
@@ -266,7 +266,46 @@ describe('the notification', () => {
 
     expect(result.status).toBe(422);
     expect(recordedEvent(eventRepository).notified).toBe(false);
-    expect(recordedEvent(eventRepository).notifyChannel).toBe('none');
+    // 'NONE', not the null messenger's own lower-case provider name. The row is
+    // queried, and `notifyChannel = 'NONE'` is precisely the audit question
+    // "which denials could nobody be told about?": two spellings for one fact
+    // made that query drop every tenant running without messaging, silently.
+    expect(recordedEvent(eventRepository).notifyChannel).toBe('NONE');
+  });
+
+  test('"no channel" has one spelling, whichever way it came about', async () => {
+    const { createNullMessenger } = require('../adapters/messaging/null-messenger');
+
+    // Two different causes — the tag has no owner chat, or the tenant has no
+    // messaging at all — and one audit fact.
+    const noChat = makeEventRepository();
+    await makeUseCase({
+      tagRepository: makeTagRepository({ ...BOUND_DENIED, chatId: '' }),
+      eventRepository: noChat,
+      messenger: makeMessenger(),
+    }).execute({ tag: 'E280' });
+
+    const noMessaging = makeEventRepository();
+    await makeUseCase({
+      tagRepository: makeTagRepository(BOUND_DENIED),
+      eventRepository: noMessaging,
+      messenger: createNullMessenger(),
+    }).execute({ tag: 'E280' });
+
+    expect(recordedEvent(noChat).notifyChannel).toBe(recordedEvent(noMessaging).notifyChannel);
+  });
+
+  test('a real provider keeps its own name', async () => {
+    // Normalising the sentinel must not normalise everything: the row says which
+    // channel was used, and 'telegram' is the answer, not 'TELEGRAM'.
+    const eventRepository = makeEventRepository();
+    await makeUseCase({
+      tagRepository: makeTagRepository(BOUND_DENIED),
+      eventRepository,
+      messenger: makeMessenger('telegram', { success: false }),
+    }).execute({ tag: 'E280' });
+
+    expect(recordedEvent(eventRepository).notifyChannel).toBe('telegram');
   });
 });
 

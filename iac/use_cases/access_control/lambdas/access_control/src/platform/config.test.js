@@ -1,6 +1,6 @@
 'use strict';
 
-const { loadConfig, validateConfig, MAX_DEDUP_WINDOW_MS } = require('./config');
+const { loadConfig, validateConfig } = require('./config');
 
 // The same tables the handlers declare. Kept here rather than imported so a
 // handler that quietly drops a requirement shows up as a failure, not as two
@@ -43,21 +43,6 @@ describe('loadConfig', () => {
     for (const value of ['1', 'true', 'TRUE', 'yes', 'on']) {
       expect(loadConfig({ ...SCAN_ENV, AUTO_REGISTER_TAGS: value }).autoRegisterTags).toBe(true);
     }
-  });
-
-  test('the dedup window defaults to 0 and rejects nonsense', () => {
-    expect(loadConfig(SCAN_ENV).dedupWindowMs).toBe(0);
-    expect(loadConfig({ ...SCAN_ENV, EVENT_DEDUP_WINDOW_MS: 'abc' }).dedupWindowMs).toBe(0);
-    expect(loadConfig({ ...SCAN_ENV, EVENT_DEDUP_WINDOW_MS: '-5' }).dedupWindowMs).toBe(0);
-    expect(loadConfig({ ...SCAN_ENV, EVENT_DEDUP_WINDOW_MS: '5000' }).dedupWindowMs).toBe(5000);
-
-    // Clamped, not honoured. The window swallows genuine second reads as readily
-    // as retried ones, so past the node's own 5 s debounce it stops being
-    // deduplication and starts being lost events. The README documents the
-    // ceiling; before this the code accepted any value.
-    expect(loadConfig({ ...SCAN_ENV, EVENT_DEDUP_WINDOW_MS: '60000' }).dedupWindowMs).toBe(
-      MAX_DEDUP_WINDOW_MS,
-    );
   });
 });
 

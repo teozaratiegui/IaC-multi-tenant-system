@@ -154,7 +154,7 @@ handler llegue a ejecutarse.
 
 ## 4. Modelo de datos
 
-### `<org>-<env>-tags`
+### `<org>-<env>-access-control-tags`
 
 - PK `tagId` (S)
 - GSI **`chatId-index`**: hash `chatId` (S), **range `tagNameNormalized` (S)**, projection `ALL`
@@ -184,7 +184,15 @@ así que queda fuera del índice: es lo correcto, no pertenece a ningún chat.
 `tagNameNormalized` es `tagName.trim().toLowerCase()`; `tagName` conserva las
 mayúsculas para mostrar.
 
-### `<org>-<env>-events`
+### `<org>-<env>-access-control-events`
+
+> El segmento del caso de uso está en el nombre de las dos tablas, igual que en el
+> de las tres funciones. Sin él, un segundo caso de uso de la misma organización
+> declararía `acme-dev-tags` desde otro state: el `apply` falla con
+> `ResourceInUseException`, o peor, alguien importa la tabla y quedan dos roots
+> gestionándola. Se corrigió con las tablas sin desplegar, porque renombrar una
+> tabla de DynamoDB es destroy + create y el PITR está apagado.
+
 
 - PK `tagId` (S)
 - **SK `eventId` (S)**
@@ -212,7 +220,11 @@ El handler escribe además, como atributos normales: `eventTime` (N, epoch ms),
 Opcionalmente `nodeId` y `clientTimestamp`, cuando el que llama los manda.
 
 Y en una denegación, `notified` (BOOL) y `notifyChannel` (S: el proveedor, o
-`NONE` cuando el tag no tenía a quién avisar). Ese par vive acá y **no** en el
+`NONE` cuando el tag no tenía a quién avisar — **una sola ortografía**: el
+`NullMessenger` reporta su proveedor como `'none'` minúscula, y escribir las dos
+formas hacía que la consulta `notifyChannel = 'NONE'`, que es exactamente "¿qué
+denegaciones no se pudieron notificar?", perdiera en silencio a todo tenant sin
+mensajería). Ese par vive acá y **no** en el
 body a propósito: el gateway cachea `(status, body)` por tag 300 s, así que un
 body que dijera "notificado" se le serviría a lecturas que no notificaron a
 nadie. En la fila del evento es auditable y consultable, que es lo que hace

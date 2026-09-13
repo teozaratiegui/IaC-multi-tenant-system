@@ -7,8 +7,8 @@
 #   associate-tag  bind a tag to an owner and a chat
 #   webhook        inbound messages from the messaging provider (opt-in)
 #
-#   <org>-<env>-tags    tagId -> allowed, owner, chatId   (+ GSI chatId-index)
-#   <org>-<env>-events  tagId + eventId, one row per scan
+#   <org>-<env>-access-control-tags    tagId -> allowed, owner, chatId (+ GSI)
+#   <org>-<env>-access-control-events  tagId + eventId, one row per scan
 #
 # Credentials come from the tenant layer and are only read at runtime, from SSM.
 #
@@ -24,7 +24,17 @@
 # -----------------------------------------------------------------------------
 
 locals {
-  name_prefix   = "${var.org_slug}-${var.environment}"
+  name_prefix = "${var.org_slug}-${var.environment}"
+
+  # Tables carry the use-case segment too, and the functions already did
+  # (`${local.name_prefix}-access-control-tag-scan`). Without it the tables were
+  # plain `acme-dev-tags` / `acme-dev-events`, so a second use case in the same
+  # organisation would declare the same two table names from its own state: the
+  # apply fails with ResourceInUseException, or — worse — somebody imports the
+  # table and two roots manage it. Added while nothing is deployed, because
+  # renaming a DynamoDB table is destroy-and-create and PITR is off.
+  table_prefix = "${local.name_prefix}-access-control"
+
   lambda_source = "${path.module}/lambdas/access_control"
 
   # Two different things, deliberately not one flag.
@@ -118,7 +128,7 @@ locals {
 module "table_tags" {
   source = "../../modules/dynamodb"
 
-  table_name   = "${local.name_prefix}-tags"
+  table_name   = "${local.table_prefix}-tags"
   hash_key     = "tagId"
   billing_mode = "PAY_PER_REQUEST"
 
@@ -151,7 +161,7 @@ module "table_tags" {
 module "table_events" {
   source = "../../modules/dynamodb"
 
-  table_name   = "${local.name_prefix}-events"
+  table_name   = "${local.table_prefix}-events"
   hash_key     = "tagId"
   range_key    = "eventId"
   billing_mode = "PAY_PER_REQUEST"

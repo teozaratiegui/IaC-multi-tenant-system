@@ -34,7 +34,7 @@ describe('buildEventId', () => {
   });
 
   test('a caller-supplied key makes the id deterministic', () => {
-    const args = { epochMs: 1758000000000, idempotencyKey: 'scan-7', dedupWindowMs: 0 };
+    const args = { epochMs: 1758000000000, idempotencyKey: 'scan-7' };
     expect(buildEventId(args)).toBe(buildEventId(args));
     expect(buildEventId(args)).toContain('scan-7');
   });
@@ -42,28 +42,25 @@ describe('buildEventId', () => {
   test('without a key two calls at the same instant get different ids', () => {
     // This is today's behaviour and it is why a gateway retry still duplicates:
     // the fix has to come from the gateway sending a key (finding G3).
-    const args = { epochMs: 1758000000000, dedupWindowMs: 0 };
+    const args = { epochMs: 1758000000000 };
     expect(buildEventId(args)).not.toBe(buildEventId(args));
   });
 
-  test('a dedup window collapses everything inside the same bucket', () => {
-    const window = 10000;
-    const base = 1758000000000;
-    expect(buildEventId({ epochMs: base, dedupWindowMs: window })).toBe(
-      buildEventId({ epochMs: base + 9999, dedupWindowMs: window }),
-    );
-    expect(buildEventId({ epochMs: base, dedupWindowMs: window })).not.toBe(
-      buildEventId({ epochMs: base + 10000, dedupWindowMs: window }),
-    );
+  test('both branches keep the 13-digit-then-hash shape', () => {
+    // Which is what makes a range query over one tag chronological: the sort key
+    // is compared lexicographically, so the epoch half has to be fixed-width.
+    const shape = /^\d{13}#.+$/;
+    expect(buildEventId({ epochMs: 1758000000000 })).toMatch(shape);
+    expect(buildEventId({ epochMs: 1758000000000, idempotencyKey: 'k' })).toMatch(shape);
   });
 
-  test('every branch keeps the 13-digit-then-hash shape', () => {
-    // The window branch used to return `w<bucket>`, which sorts after every
-    // timestamp key ('w' > '9'): a chronological range query over one tag then
-    // silently skipped half the table.
-    const shape = /^\d{13}#.+$/;
-    expect(buildEventId({ epochMs: 1758000000000, dedupWindowMs: 0 })).toMatch(shape);
-    expect(buildEventId({ epochMs: 1758000000000, dedupWindowMs: 10000 })).toMatch(shape);
-    expect(buildEventId({ epochMs: 1758000000000, idempotencyKey: 'k' })).toMatch(shape);
+  test('an unknown option is ignored, not honoured', () => {
+    // The time-bucketing branch is gone — no Terraform variable ever set it, so
+    // it was unreachable in every deployment. A leftover caller passing the old
+    // option must get today's behaviour, not a silently different key space.
+    const a = buildEventId({ epochMs: 1758000000000, dedupWindowMs: 10000 });
+    const b = buildEventId({ epochMs: 1758000000000, dedupWindowMs: 10000 });
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^1758000000000#/);
   });
 });

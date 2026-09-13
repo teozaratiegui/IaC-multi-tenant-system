@@ -1,12 +1,19 @@
 'use strict';
 
 /**
- * Environment for the handler tests: reads `.env` in this folder when present,
- * falls back to safe defaults otherwise. `.env.example` is documentation only.
+ * Environment for the handler tests.
+ *
+ * Fixed values, by design. This used to read a `.env` sitting next to it when
+ * one was present, which made the result of `npm test` depend on an untracked
+ * file: a developer with `AUTO_REGISTER_TAGS=true` in their local `.env` — a
+ * perfectly reasonable thing to have for a manual run against dev — got a red
+ * suite, and CI would have got a green one from the same commit. A test either
+ * wants a value or does not care; the ones that want it pass an override.
+ *
+ * `.env` still exists and is still read, by `integration-test.js`: that script
+ * talks to real AWS and genuinely needs real credentials. `.env.example`
+ * documents both.
  */
-const path = require('node:path');
-const fs = require('node:fs');
-const dotenv = require('dotenv');
 
 const HANDLER_KEYS = [
   'AWS_REGION',
@@ -16,7 +23,6 @@ const HANDLER_KEYS = [
   'ENVIRONMENT',
   'ORG_NAME',
   'AUTO_REGISTER_TAGS',
-  'EVENT_DEDUP_WINDOW_MS',
   'MESSAGING_PROVIDER',
   'MESSAGING_TOKEN_PARAMETER_NAME',
   'WEBHOOK_SECRET_PARAMETER_NAME',
@@ -37,7 +43,6 @@ const FALLBACKS = {
   // Tests assert the closed default explicitly; a suite that silently ran with
   // auto-registration on would pass while production let every tag through.
   AUTO_REGISTER_TAGS: 'false',
-  EVENT_DEDUP_WINDOW_MS: '0',
   // Messaging off by default, which is what Terraform produces for a tenant
   // with enable_messaging = false. tag-scan must work exactly like this.
   MESSAGING_PROVIDER: '',
@@ -50,26 +55,23 @@ const FALLBACKS = {
   MESSAGING_TIMEZONE: '',
 };
 
-function readDotEnv() {
-  const envPath = path.join(__dirname, '.env');
-  if (!fs.existsSync(envPath)) return {};
-  return dotenv.parse(fs.readFileSync(envPath, 'utf8'));
-}
-
 /** Applies the handler variables to process.env (call from Jest beforeEach). */
 function applyHandlerTestEnv(overrides = {}) {
-  const fromFile = readDotEnv();
   for (const key of HANDLER_KEYS) {
-    const value = overrides[key] ?? fromFile[key];
+    const value = overrides[key];
     const resolved = value !== undefined && value !== '' ? String(value).trim() : FALLBACKS[key];
     process.env[key] = resolved ?? '';
   }
 }
 
-/** API key used by both the mocked SSM value and the request header in tests. */
+/**
+ * API key used by both the mocked SSM value and the request header in tests.
+ * A literal, so the two sides of every comparison come from the same place.
+ */
+const UNIT_TEST_API_KEY = 'test-api-key-value';
+
 function getUnitTestApiKey() {
-  const value = readDotEnv().UNIT_TEST_API_KEY;
-  return value !== undefined && value !== '' ? String(value).trim() : 'test-api-key-value';
+  return UNIT_TEST_API_KEY;
 }
 
-module.exports = { readDotEnv, applyHandlerTestEnv, getUnitTestApiKey, HANDLER_KEYS };
+module.exports = { applyHandlerTestEnv, getUnitTestApiKey, HANDLER_KEYS };

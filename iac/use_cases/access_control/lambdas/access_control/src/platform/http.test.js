@@ -1,6 +1,6 @@
 'use strict';
 
-const { response, header, parseBody } = require('./http');
+const { response, header, headerText, parseBody } = require('./http');
 
 describe('response', () => {
   test('serialises the body as JSON with the right content type', () => {
@@ -19,6 +19,18 @@ describe('header', () => {
   test('returns undefined when there are no headers at all', () => {
     expect(header({}, 'x-api-key')).toBeUndefined();
     expect(header(undefined, 'x-api-key')).toBeUndefined();
+  });
+});
+
+describe('headerText', () => {
+  test('a miss is the empty string, so callers can compare and slice safely', () => {
+    // The inbound adapters both compare and slice this value (a shared secret,
+    // an `sha256=` prefix). They used to carry a copy of the lookup each, and
+    // the copies disagreed about a miss.
+    expect(headerText({ headers: { 'X-Secret': 'abc' } }, 'x-secret')).toBe('abc');
+    expect(headerText({}, 'x-secret')).toBe('');
+    expect(headerText(undefined, 'x-secret')).toBe('');
+    expect(headerText({ headers: { 'x-secret': 42 } }, 'x-secret')).toBe('42');
   });
 });
 

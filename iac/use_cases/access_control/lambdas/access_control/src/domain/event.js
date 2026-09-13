@@ -53,28 +53,27 @@ function padMillis(epochMs) {
  *
  * The gateway retries a failed POST up to four times without an idempotency key
  * of any kind (thesis-sketch/src/infrastructure/aws/aws_client.py:36-42), so the
- * same physical scan can arrive several times. Three strategies, in order:
+ * same physical scan can arrive several times. Two cases:
  *
- *   1. the caller supplied a key — the retries then collapse onto one row;
- *   2. a dedup window is configured — all events for a tag inside the same
- *      window share an id. Note this only ever collapses a *fast* retry: an
- *      attempt that times out is already 5 s later (the gateway's timeout), so
- *      it lands in the next bucket. See the timeout note in main.tf;
- *   3. neither — a random discriminator, which is what today's traffic gets.
- *      Retries then still produce separate rows; the real fix belongs in the
- *      gateway (finding G3).
+ *   1. the caller supplied a key — the retries collapse onto one row, and the
+ *      conditional write in the repository is what makes that stick;
+ *   2. it did not — a random discriminator, which is what today's traffic gets.
+ *      Retries then produce separate rows; the real fix is for the gateway to
+ *      send a key (finding G3), and nothing here can substitute for it.
  *
- * Every branch keeps the `<13 digits>#...` shape. It used to return `w<bucket>`
- * for the window branch, which sorts *after* every timestamp key ('w' > '9'):
- * turning the window on split the table into two key spaces and a chronological
- * range query over a tag silently skipped one of them.
+ * There used to be a third branch: a time-bucketed id, so every scan of one tag
+ * inside a configured window shared a key. It is gone. No Terraform variable
+ * ever set `EVENT_DEDUP_WINDOW_MS`, so in every possible deployment the window
+ * was 0 and the branch unreachable — and it could not have been turned on
+ * safely anyway: it collapses a genuine second read exactly as readily as a
+ * retried one, and the retry it was meant to catch arrives 5 s later (the
+ * gateway's own timeout), which is past any window short enough to be safe.
+ *
+ * Both remaining branches keep the `<13 digits>#...` shape, so lexicographic
+ * order on the sort key stays chronological.
  */
-function buildEventId({ epochMs, idempotencyKey, dedupWindowMs }) {
+function buildEventId({ epochMs, idempotencyKey }) {
   if (idempotencyKey) return `${padMillis(epochMs)}#${idempotencyKey}`;
-  if (dedupWindowMs > 0) {
-    const bucketStart = Math.floor(epochMs / dedupWindowMs) * dedupWindowMs;
-    return `${padMillis(bucketStart)}#w`;
-  }
   return `${padMillis(epochMs)}#${randomUUID()}`;
 }
 

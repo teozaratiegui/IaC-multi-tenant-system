@@ -202,7 +202,10 @@ POST <associate_tag_url>
 Header  x-api-key: <the tenant's API key>
 Body    {"op": "provision" | "associate",     // default: associate
          "tag": "E28006900000500E88C6A4A7",
-         "allowed": true,                     // provision only, default true
+         "allowed": true,                     // provision only, default true.
+                                              // A real JSON boolean: "false" in
+                                              // quotes is rejected with 400, never
+                                              // coerced (Boolean("false") is true).
          "chatId": "12345", "tagName": "bici",
          "ownerName": "Teo", "ownerLastName": "Zaratiegui"}
 ```
@@ -280,7 +283,7 @@ gateway.
 
 ## Data model
 
-`<org>-<env>-tags` — who may pass
+`<org>-<env>-access-control-tags` — who may pass
 
 | Attribute | Type | |
 | --- | --- | --- |
@@ -303,7 +306,7 @@ listing filtered in memory.
 > in one place (`domain/tag.js`), and a test asserts it. An auto-registered tag has neither
 > and is correctly outside the index: it belongs to no chat.
 
-`<org>-<env>-events` — what happened
+`<org>-<env>-access-control-events` — what happened
 
 | Attribute | Type | |
 | --- | --- | --- |
@@ -315,7 +318,7 @@ listing filtered in memory.
 | `nodeId` | S | which reader, when the caller sends it |
 | `clientTimestamp` | S | the reader's own clock, when the caller sends it |
 | `notified` | BOOL | on a denial: whether the owner was actually told |
-| `notifyChannel` | S | the provider, or `NONE` when the tag had nobody to tell |
+| `notifyChannel` | S | the provider, or `NONE` when the tag had nobody to tell — one spelling, so `notifyChannel = 'NONE'` really does find every denial nobody heard about |
 
 `notified` and `notifyChannel` live here and **not** in the HTTP body on purpose: the
 gateway caches `(status, body)` per tag for 300 s, so a body that said "notified" would be
@@ -333,9 +336,13 @@ key lands on the same row instead of creating a second event.
 > POSTs with no key are indistinguishable from two real reads. See
 > the project-level gateway findings report, finding G3.
 
-`event_dedup_window_ms` is the stopgap: inside that window all events for one tag share an
-id. It is off by default, and capped at 5000 ms, because the window also swallows a genuine
-second read — it has to stay below the node's own 5 s debounce.
+There used to be a time-bucketing stopgap here — all events for one tag inside a configured
+window sharing an id. It has been removed: no Terraform variable ever set it, so it was
+unreachable in every deployment, and it could not have been switched on safely anyway. It
+collapses a genuine second read exactly as readily as a retried one, and the retry it was
+meant to catch arrives 5 s later (the gateway's own timeout) — past any window short enough
+to be safe. **The fix is an idempotency key from the caller, and nothing on this side
+substitutes for it.**
 
 ---
 
@@ -359,12 +366,6 @@ Moving an organisation from Telegram to WhatsApp is **one line in its `terraform
 and an apply** — no code. A provider nobody has implemented yet is a directory under
 `src/adapters/messaging/`, two files, one line in `registry.js` and one more value in the
 `messaging_provider` validation.
-
-`EVENT_DEDUP_WINDOW_MS` is read by the handler but no Terraform variable sets it today, so
-it is always 0 in a deployment. Wiring it up is a two-line change if the stopgap above is
-ever wanted. The 5000 ms ceiling is enforced in `platform/config.js`, not merely documented:
-a larger value is clamped, because past the node's own debounce the window stops collapsing
-retries and starts dropping real reads.
 
 `auto_register_tags` used to be implied by `ENVIRONMENT=dev`, whose variable had
 `default = "dev"` — so the permissive path was the default and a typo in the environment
@@ -405,13 +406,20 @@ request validation).
 ```bash
 cd iac/use_cases/access_control/lambdas/access_control
 npm install
-npm test                  # 272 unit tests, AWS SDK mocked, no network
+npm test                  # 284 unit tests, AWS SDK mocked, no network
 npm run test:integration  # optional, against a deployed URL
 ```
 
-The integration test skips itself when `ACCESS_CONTROL_URL` and `ACCESS_CONTROL_API_KEY`
-are unset, so it is safe to run without secrets. What it asserts is the contract that
-matters: that the status code is one the Fog gateway forwards to the node.
+The unit suite reads **nothing** from `.env`: its environment is the fixed table in
+`test-env.js`, and a test that wants a particular value passes an override. It used to read
+a local `.env` when one was present, which made the result depend on an untracked file —
+anyone keeping `AUTO_REGISTER_TAGS=true` there for manual runs got a red suite from a
+commit that is green in CI.
+
+The integration test does read `.env`, because it talks to real AWS. It skips itself when
+`ACCESS_CONTROL_URL` and `ACCESS_CONTROL_API_KEY` are unset, so it is safe to run without
+secrets. What it asserts is the contract that matters: that the status code is one the Fog
+gateway forwards to the node.
 
 Two of the unit tests are worth knowing about:
 

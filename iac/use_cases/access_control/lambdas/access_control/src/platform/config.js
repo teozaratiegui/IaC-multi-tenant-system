@@ -20,26 +20,9 @@ const TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
 const DEFAULT_LOCALE = 'es-AR';
 const DEFAULT_TIMEZONE = 'America/Argentina/Buenos_Aires';
 
-/**
- * Ceiling for the event dedup window.
- *
- * The window collapses every scan of one tag into a single row, so it swallows
- * genuine second reads as readily as retried ones. It is only ever safe below the
- * node's own debounce interval (5 s) — past that it is not deduplication, it is
- * losing events. A value over the ceiling is clamped rather than honoured: the
- * whole feature is a stopgap for the gateway sending no idempotency key
- * (finding G3), and erring towards a shorter window only costs duplicate rows.
- */
-const MAX_DEDUP_WINDOW_MS = 5000;
-
 function asBoolean(value, fallback = false) {
   if (value === undefined || value === '') return fallback;
   return TRUE_VALUES.has(String(value).trim().toLowerCase());
-}
-
-function asInteger(value, fallback) {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function asString(value, fallback = '') {
@@ -60,12 +43,6 @@ function loadConfig(env = process.env) {
     // used to be implied by ENVIRONMENT=dev. It is now an explicit flag, so a
     // stray ENVIRONMENT value can no longer open the door to every tag.
     autoRegisterTags: asBoolean(env.AUTO_REGISTER_TAGS, false),
-
-    // Collapses repeated events for one tag into a single row inside this
-    // window. 0 disables it. It is only safe while the window stays below the
-    // Fog cache TTL and the Edge debounce interval, and it is a workaround for
-    // the gateway retrying a non-idempotent POST (finding G3).
-    dedupWindowMs: Math.min(asInteger(env.EVENT_DEDUP_WINDOW_MS, 0), MAX_DEDUP_WINDOW_MS),
 
     // Messaging. All of these are absent when the tenant runs without it, and
     // tag-scan has to keep working: `none` selects the null messenger rather
@@ -113,8 +90,6 @@ module.exports = {
   validateConfig,
   messagingEnabled,
   asBoolean,
-  asInteger,
   DEFAULT_LOCALE,
   DEFAULT_TIMEZONE,
-  MAX_DEDUP_WINDOW_MS,
 };

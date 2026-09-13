@@ -1,7 +1,15 @@
 'use strict';
 
 const { createHmac, timingSafeEqual } = require('node:crypto');
-const { httpMethod, queryParams, rawBody, textResponse } = require('../../../platform/http');
+const {
+  headerText,
+  httpMethod,
+  parseBody,
+  queryParams,
+  rawBody,
+  textResponse,
+} = require('../../../platform/http');
+const { acknowledge } = require('../inbound-ack');
 
 const SIGNATURE_HEADER = 'x-hub-signature-256';
 
@@ -53,7 +61,7 @@ function createWhatsAppInbound({ secretProvider, verifyToken = '' } = {}) {
       const appSecret = await secretProvider();
       if (!appSecret) return { ok: false, reason: 'webhook secret is not configured' };
 
-      const received = headerValue(event, SIGNATURE_HEADER);
+      const received = headerText(event, SIGNATURE_HEADER);
       if (!received.startsWith('sha256=')) return { ok: false, reason: 'missing signature' };
 
       const expected = createHmac('sha256', appSecret).update(rawBody(event), 'utf8').digest('hex');
@@ -64,7 +72,7 @@ function createWhatsAppInbound({ secretProvider, verifyToken = '' } = {}) {
     },
 
     async parseIncoming(event) {
-      const body = parseJson(rawBody(event) || event?.body);
+      const body = parseBody(event) ?? {};
       const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0] ?? {};
       return {
         from: String(message.from ?? ''),
@@ -73,13 +81,7 @@ function createWhatsAppInbound({ secretProvider, verifyToken = '' } = {}) {
     },
 
     /** Always 200: a non-2xx makes Meta redeliver a command that already ran. */
-    buildHttpResponse(result) {
-      return {
-        statusCode: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ok: Boolean(result?.success), error: result?.errorMessage ?? null }),
-      };
-    },
+    buildHttpResponse: acknowledge,
   };
 }
 
@@ -89,24 +91,6 @@ function hexEquals(a, b) {
     return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
   } catch {
     return false;
-  }
-}
-
-function headerValue(event, name) {
-  const headers = event?.headers ?? {};
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === name) return String(value);
-  }
-  return '';
-}
-
-function parseJson(raw) {
-  if (raw && typeof raw === 'object') return raw;
-  try {
-    const parsed = JSON.parse(raw || '{}');
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
   }
 }
 

@@ -1,7 +1,8 @@
 'use strict';
 
 const { constantTimeEquals } = require('../../../platform/api-key');
-const { rawBody } = require('../../../platform/http');
+const { headerText, parseBody } = require('../../../platform/http');
+const { acknowledge } = require('../inbound-ack');
 
 /** Telegram sends this header on every webhook call when setWebhook was given a secret_token. */
 const SECRET_HEADER = 'x-telegram-bot-api-secret-token';
@@ -31,7 +32,7 @@ function createTelegramInbound({ secretProvider } = {}) {
       const expected = await secretProvider();
       if (!expected) return { ok: false, reason: 'webhook secret is not configured' };
 
-      const received = headerValue(event, SECRET_HEADER);
+      const received = headerText(event, SECRET_HEADER);
       if (!constantTimeEquals(received, expected)) {
         return { ok: false, reason: 'secret token mismatch' };
       }
@@ -39,13 +40,13 @@ function createTelegramInbound({ secretProvider } = {}) {
     },
 
     async parseIncoming(event) {
-      // Through `rawBody`, like the WhatsApp adapter: a Function URL base64-encodes
-      // the body whenever it does not recognise the content type as text. Telegram
-      // sends application/json so it does not fire today — but reading `event.body`
-      // raw means that if it ever did, JSON.parse would fail silently, the sender
-      // would come back empty and the command would be answered 200 and dropped,
-      // with Telegram never retrying it.
-      const body = parseJson(rawBody(event) || event?.body);
+      // Through the shared `parseBody`, which decodes before parsing: a Function
+      // URL base64-encodes the body whenever it does not recognise the content
+      // type as text. Telegram sends application/json so it does not fire today —
+      // but reading `event.body` raw means that if it ever did, JSON.parse would
+      // fail silently, the sender would come back empty, and the command would be
+      // answered 200 and dropped with Telegram never retrying it.
+      const body = parseBody(event) ?? {};
       const message = body.message || body.edited_message || {};
       return {
         from: String(message.chat?.id ?? ''),
@@ -56,43 +57,13 @@ function createTelegramInbound({ secretProvider } = {}) {
       };
     },
 
-    /**
-     * Always 200, even for a failed command.
-     *
-     * A non-2xx makes Telegram redeliver the same update — indefinitely, and
-     * for a command that may already have run. The error goes in the body and
-     * in the log instead.
-     */
-    buildHttpResponse(result) {
-      return {
-        statusCode: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ok: Boolean(result?.success), error: result?.errorMessage ?? null }),
-      };
-    },
+    /** Always 200, even for a failed command — see `acknowledge`. */
+    buildHttpResponse: acknowledge,
   };
 }
 
 function stripBotSuffix(text) {
   return text.replace(BOT_SUFFIX, '$1');
-}
-
-function headerValue(event, name) {
-  const headers = event?.headers ?? {};
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === name) return value;
-  }
-  return '';
-}
-
-function parseJson(raw) {
-  if (raw && typeof raw === 'object') return raw;
-  try {
-    const parsed = JSON.parse(raw || '{}');
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
 }
 
 module.exports = { createTelegramInbound };

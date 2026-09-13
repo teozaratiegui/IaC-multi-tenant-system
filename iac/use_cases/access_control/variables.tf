@@ -1,6 +1,18 @@
 variable "org_slug" {
-  description = "Organisation identifier (e.g. acme)"
+  description = "Organisation identifier (e.g. acme). Must match the tenant layer's, exactly."
   type        = string
+
+  # The same rule the tenant layer enforces, and it has to be here too: nothing
+  # ties the two roots together. The SSM parameter names arrive as plain strings
+  # (see the org root), so there is no data source to notice that `Acme` is not
+  # `acme` — the apply succeeds, the infrastructure comes up complete, and the
+  # first invoke fails with a 500 and ParameterNotFound. Validating the shape on
+  # both sides turns the likeliest version of that mistake into a plan-time
+  # error instead of a runtime one.
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$", var.org_slug))
+    error_message = "org_slug must be lower-case alphanumeric with hyphens, 3-32 characters, and must match the tenant layer's org_slug exactly."
+  }
 }
 
 variable "environment" {

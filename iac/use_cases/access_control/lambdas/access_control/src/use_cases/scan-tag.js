@@ -7,6 +7,20 @@ const { buildEventId } = require('../domain/event');
 const NO_CHANNEL = 'NONE';
 
 /**
+ * The channel name the event row records — one spelling per fact.
+ *
+ * "Nobody to tell" arrives two ways: the tag has no owner chat, or the tenant
+ * runs without messaging and the null messenger reports its provider as the
+ * lower-case string `none`. Those used to be written as `NONE` and `none`, and
+ * the row is *queried*: `notifyChannel = 'NONE'` is exactly the audit question
+ * "which denials could nobody be told about?", so it silently dropped every
+ * tenant of the second kind. A real provider keeps its own name.
+ */
+function channelName(provider) {
+  return String(provider ?? '').toLowerCase() === 'none' ? NO_CHANNEL : provider;
+}
+
+/**
  * A reader saw a tag: decide, record, and tell the owner if it should not have
  * moved.
  *
@@ -105,12 +119,15 @@ class ScanTagUseCase {
           reason: result?.errorMessage,
         });
       }
-      return { notified: Boolean(result?.success), notifyChannel: this.messenger.provider };
+      return {
+        notified: Boolean(result?.success),
+        notifyChannel: channelName(this.messenger.provider),
+      };
     } catch (error) {
       // A port implementation is not supposed to throw, but the access decision
       // must not depend on every adapter honouring that.
       console.error('Owner notification threw', error);
-      return { notified: false, notifyChannel: this.messenger.provider };
+      return { notified: false, notifyChannel: channelName(this.messenger.provider) };
     }
   }
 
@@ -124,11 +141,7 @@ class ScanTagUseCase {
       isoTime: timestamp.toISOString(),
       nodeId: request.nodeId,
       clientTimestamp: request.clientTimestamp,
-      eventId: buildEventId({
-        epochMs,
-        idempotencyKey: request.idempotencyKey,
-        dedupWindowMs: this.config.dedupWindowMs,
-      }),
+      eventId: buildEventId({ epochMs, idempotencyKey: request.idempotencyKey }),
     };
   }
 

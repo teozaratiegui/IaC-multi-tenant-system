@@ -36,6 +36,19 @@ function header(event, name) {
   return undefined;
 }
 
+/**
+ * The same lookup, as a string, with a miss as the empty string.
+ *
+ * For callers that are about to compare or slice the value: a shared secret,
+ * an HMAC signature. Each inbound adapter used to carry its own copy of this,
+ * and the three copies disagreed about a miss — `undefined` here, `''` there,
+ * `String(value)` in the third — which is precisely the kind of difference that
+ * decides whether a missing header throws or fails closed.
+ */
+function headerText(event, name) {
+  return String(header(event, name) ?? '');
+}
+
 /** The request method, normalised. A Function URL and a REST event spell it differently. */
 function httpMethod(event) {
   const raw = event?.requestContext?.http?.method || event?.httpMethod || 'POST';
@@ -90,4 +103,13 @@ function parseBody(event) {
   }
 }
 
-module.exports = { response, textResponse, header, httpMethod, queryParams, rawBody, parseBody };
+module.exports = {
+  response,
+  textResponse,
+  header,
+  headerText,
+  httpMethod,
+  queryParams,
+  rawBody,
+  parseBody,
+};
