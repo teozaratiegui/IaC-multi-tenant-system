@@ -36,7 +36,9 @@ run `terraform apply`.
 The tenant layer exists because the credentials live at `/<org>/<env>/…` — names that do
 not mention the use case. When a use-case root created them, the second use case of the
 same organisation collided with the first, so the architecture supported exactly one use
-case per (org, environment). Use-case roots now *read* them with `data "aws_ssm_parameter"`.
+case per (org, environment). Use-case roots *build* those names as strings rather than
+reading them with `data "aws_ssm_parameter"`, which would copy the decrypted values into
+their own state file — see *Security posture* below for why, and what it costs.
 
 Credentials, all `SecureString`, all created empty and filled in out of band:
 
@@ -52,8 +54,11 @@ listing the use case in the tenant root's `messaging_use_cases`. That is not sym
 own sake — one organisation can perfectly well run access control on Telegram and something
 else on WhatsApp, and a single shared token can only ever hold one provider's credential.
 
-A use-case root that reads a parameter the tenant root did not create fails at `plan`, which
-is the intended way to discover you forgot to list it.
+**Apply order is a runbook step, not something Terraform enforces.** Because the names are
+built as strings, nothing verifies that the parameter exists: a use-case root applied before
+its tenant root — or with an `org_slug` that does not match it — completes successfully, and
+the mistake surfaces as a `ParameterNotFound` in the function's log on the first invoke. Run
+the tenant root first, and keep `org_slug` identical in both `terraform.tfvars`.
 
 ### The handler code
 
@@ -467,3 +472,38 @@ Both have the same textbook fix — a separate administration credential, or a s
 `/claim <code>` issued by the operator — and both are explicit future work rather than
 oversights. Rate limiting on the public Function URLs is a third gap, unrelated to this
 one and equally open.
+
+### What a second use case would cost today
+
+The catalogue this repository sells is a catalogue of **Terraform composition**: the
+primitives in `modules/`, the business composition in `use_cases/`, and the per-tenant
+values in `orgs/`. That part holds — a second use case adds a directory under `use_cases/`
+and a deployment root under `orgs/<org>/`, and touches neither `modules/` nor `tenant/`.
+
+The handler code is a different story, and it is worth stating plainly rather than
+discovering it during the second use case. Roughly **45 % of `src/` is use-case agnostic**
+— `platform/http.js`, `platform/api-key.js`, `platform/ssm-parameter.js`, all of
+`adapters/messaging/`, and `architecture.test.js` — and none of it lives anywhere shared.
+A second use case would copy those files, security-sensitive ones included (the HMAC
+verification, the constant-time comparison, the cached SSM read), and each copy would then
+need auditing on its own.
+
+**This is deferred on purpose, not overlooked.** Extracting a shared library while there is
+exactly one consumer would validate the abstraction against nobody, and the mechanics have a
+real seam: `data.archive_file` mirrors the source tree into the zip (`filename =
+source.value`), so a second `dynamic "source"` block reading from a shared directory would
+land the files exactly where the existing `require('../platform/http')` expects them — but
+Node resolves `require` against the **physical** filesystem, so the test run would not.
+Closing that gap needs either a symlink (OS-dependent, in a repository whose argument is
+reproducibility) or a copy step before packaging (a build step, in a repository whose
+argument is `terraform apply`). Neither is worth paying for one consumer.
+
+The migration path, for whoever writes the second use case: move the agnostic files to
+`iac/use_cases/_shared/src/`, add a second `dynamic "source"` block to each use case's
+`data.archive_file` publishing them under the same `src/...` prefix, and give `_shared/` its
+own jest project. Do it with two real consumers in hand, so the boundary is drawn by
+evidence instead of by guesswork.
+
+One coupling is worth removing before then, because it costs nothing: `validateConfig` in
+`platform/config.js` reads `REQUIREMENTS` and `LABELS` as module constants, and both list
+*this* use case's handlers. Passing them in as arguments makes that file fully generic.
