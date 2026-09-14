@@ -170,8 +170,31 @@ Header  x-api-key: <the tenant's API key>
 Body    {"tag": "E28006900000500E88C6A4A7",
          "nodeId": "node-3f9a1c04",          // optional
          "timestamp": "2026-09-12T14:03:07Z", // optional, the reader's own clock
-         "eventId": "…"}                      // optional idempotency key
+         "eventId": "1789300802000#n7-41"}   // optional idempotency key
 ```
+
+Optional means absent, not lax: `nodeId` and `timestamp` may be left out, but if either is
+present it has to be a string of at most 64 characters or the answer is `400`. Nothing is
+coerced, and that is the point — the AWS SDK does not reject a non-string attribute, it
+writes it as the empty string, so a `nodeId` serialised as a number used to be answered
+`200` and stored as an event with no reader on it.
+
+`eventId` (or the `Idempotency-Key` header) is what makes a retried POST collapse onto one
+row. Send it as `<13-digit epoch ms>#<unique>` and it becomes the sort key verbatim, which
+keeps the tag's history range-queryable. Send an opaque token together with `timestamp` and
+the prefix is derived from the reader's clock. Send an opaque token alone and the event is
+still deduplicated, but it will not appear in an `eventId BETWEEN` window — the function
+logs a warning saying so.
+
+Two things follow from that last case and both bite quietly, so they are worth stating. The
+key must be unique **for the life of the tag**, not for the life of one attempt: an opaque
+token that repeats — a per-node counter that restarts after a reboot, say — makes a genuine
+later scan collapse onto the older row, and the reader still gets a success. And the key is
+validated before anything is written: one that is not a string, is longer than 128
+characters, or begins with an implausible epoch (before 2021, or more than a day ahead of
+the function's own clock) is rejected with `400`. That last check is not cosmetic — without
+it a reader with no synchronised clock sends `0000000006123#…`, is taken at its word, and
+files every scan at the very start of its tag's history.
 
 | Status | Meaning |
 | --- | --- |
@@ -179,7 +202,7 @@ Body    {"tag": "E28006900000500E88C6A4A7",
 | `201` | Tag was unknown and got registered (only with `auto_register_tags = true`) |
 | `422` | Tag known and **not** allowed |
 | `404` | Tag unknown |
-| `400` | Body is not JSON, or `tag` is missing |
+| `400` | Body is not JSON, `tag` is missing or malformed, `eventId` is not a string / is over 128 characters / begins with an implausible epoch, or `nodeId` / `timestamp` is present and not a string (or over 64 characters) |
 | `401` | Missing or wrong `x-api-key` |
 | `500` | Misconfigured deployment, or DynamoDB failed |
 
@@ -325,16 +348,27 @@ gateway caches `(status, body)` per tag for 300 s, so a body that said "notified
 replayed to readings that notified nobody. On the event row it is auditable and queryable,
 which is what is actually needed.
 
-The sort key is zero-padded so lexicographic order is chronological — a range query over
-`eventId` is a time range. The discriminator is what makes the write conditional: with
+The sort key is normally zero-padded so lexicographic order is chronological — a range
+query over `eventId` is then a time range. The exception is an opaque idempotency key sent
+without a `timestamp`: that key becomes the sort key as-is, so the row deduplicates but
+falls outside a range window, and the function logs a warning each time (see the `eventId`
+note under [`tag-scan`](#tag-scan--a-reader-saw-a-tag)). The discriminator is what makes the write conditional: with
 `ConditionExpression: attribute_not_exists`, a retried POST carrying the same idempotency
 key lands on the same row instead of creating a second event.
 
-> **The gateway does not send an idempotency key yet**, and it retries a failed POST up to
-> four times (`thesis-sketch/src/infrastructure/aws/aws_client.py:36-42`). Until it does,
-> retries still produce separate rows. The Cloud side cannot fix this alone: two identical
-> POSTs with no key are indistinguishable from two real reads. See
-> the project-level gateway findings report, finding G3.
+> **This did not work until 2026-09-13**, and it is worth knowing why. The id was built as
+> `<arrival epoch>#<key>`, taking the epoch at the top of *each* invocation — so the same
+> `Idempotency-Key` arriving 5 s later produced a different sort key and a second row. An
+> idempotency key whose value depends on when it is received is not an idempotency key. The
+> unit test did not catch it because it froze the clock, under which a correct id and a
+> broken one are identical. The epoch half now comes from the event (the caller's own id,
+> or the reader's timestamp), never from its arrival — see `src/domain/event.js`.
+
+> **The gateway still does not send a key**, and it retries a failed POST up to four times
+> (`thesis-sketch/src/infrastructure/aws/aws_client.py:36-42`). Until it does, its retries
+> produce separate rows. Two identical POSTs with no key are indistinguishable from two real
+> reads, so nothing on this side substitutes for it — but the machinery that receives one
+> now actually works. See the project-level gateway findings report, finding G3.
 
 There used to be a time-bucketing stopgap here — all events for one tag inside a configured
 window sharing an id. It has been removed: no Terraform variable ever set it, so it was

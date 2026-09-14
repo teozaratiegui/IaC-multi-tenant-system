@@ -5,10 +5,16 @@ const { PutItemCommand } = require('@aws-sdk/client-dynamodb');
 /**
  * The events table: `<org>-<env>-events`, PK `tagId`, SK `eventId`.
  *
- * The sort key is `<13-digit epoch ms>#<discriminator>`: zero-padded so
+ * The sort key is normally `<13-digit epoch ms>#<discriminator>`: zero-padded so
  * lexicographic order is chronological, and carrying a discriminator so the
  * write can be conditional. It replaced a plain `eventTime`, under which two
  * scans of the same tag in the same millisecond silently overwrote each other.
+ *
+ * "Normally", because one case gives the ordering up on purpose: a caller that
+ * sends an opaque idempotency key and no reader timestamp gets that key as the
+ * sort key, which deduplicates but does not sort. `domain/event.js` says why the
+ * trade goes that way, and the use case logs each time it is taken — so a row
+ * here is always deduplicated and *usually* range-queryable, never the reverse.
  */
 class DynamoEventRepository {
   constructor(dynamoClient, { eventsTable }) {

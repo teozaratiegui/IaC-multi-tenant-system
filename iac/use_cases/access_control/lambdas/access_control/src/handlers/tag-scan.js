@@ -8,7 +8,16 @@
  *     body {"tag": "<epc>"}        optional "nodeId", "timestamp", "eventId"
  *
  * The gateway sends only `tag` today (finding G1); `nodeId` and `timestamp` are
- * accepted now so the day it forwards them nothing has to be redeployed.
+ * accepted now so the day it forwards them nothing has to be redeployed. Both
+ * are optional, and both are 400 if present and not a string — the SDK would
+ * otherwise write them as the empty string and answer 200.
+ *
+ * `eventId` (or the `Idempotency-Key` header) is what makes a retried POST
+ * collapse onto one row. To stay range-queryable it should be
+ * `<13-digit epoch ms>#<unique>`; failing that, send `timestamp` with it and
+ * the prefix is derived from the reader's clock. One that is not a string, is
+ * over 128 characters, or begins with an implausible epoch is a 400 — never a
+ * coerced sort key and never a 500. See domain/event.js.
  *
  * This file is a composition root, and the only kind of file that is one: it is
  * where AWS clients are constructed, where process.env is read, and where the
@@ -32,7 +41,7 @@ const REQUIREMENTS = {
 };
 const { response, header, parseBody } = require('../platform/http');
 const { STATUS } = require('../domain/decisions');
-const { normaliseTag } = require('../domain/event');
+const { normaliseTag, normaliseEventId, normaliseTraceField } = require('../domain/event');
 const { createMessages } = require('../domain/messages');
 const { DynamoTagRepository } = require('../adapters/dynamo/tag-repository');
 const { DynamoEventRepository } = require('../adapters/dynamo/event-repository');
@@ -101,10 +110,28 @@ exports.handler = async (event) => {
     });
   }
 
-  const tag = normaliseTag(body.tag);
-  if (!tag.ok) {
-    return response(STATUS.BAD_REQUEST, { error: 'Bad Request', message: tag.reason });
+  // Everything that ends up in DynamoDB is checked here, together, before any of
+  // it is used — and checked rather than coerced, because every coercion
+  // available is wrong in a way that answers 200: `String(x)` turns an object
+  // into the sort key "[object Object]", and the AWS SDK turns a non-string
+  // `{ S: x }` into the empty string, which blanks the very field the event row
+  // exists for. It belongs in the handler and not in the use case for the same
+  // reason the tag does: it is a statement about the request, not about access.
+  //
+  // `Date.now()` rather than the use case's injected clock: this is the
+  // composition root, and the bound being checked is 24 h wide, so the two
+  // cannot disagree in any way that matters.
+  const fields = {
+    tag: normaliseTag(body.tag),
+    eventId: normaliseEventId(body.eventId ?? header(event, 'idempotency-key'), Date.now()),
+    nodeId: normaliseTraceField(body.nodeId ?? body.node_id, 'nodeId'),
+    timestamp: normaliseTraceField(body.timestamp ?? body.ts, 'timestamp'),
+  };
+  const invalid = Object.values(fields).find((field) => !field.ok);
+  if (invalid) {
+    return response(STATUS.BAD_REQUEST, { error: 'Bad Request', message: invalid.reason });
   }
+  const { tag, eventId, nodeId, timestamp } = fields;
 
   // 3. Compose and run. An unsupported provider throws here rather than leaving
   // a deployment that quietly notifies nobody.
@@ -123,9 +150,9 @@ exports.handler = async (event) => {
 
     result = await useCase.execute({
       tag: tag.value,
-      nodeId: body.nodeId ?? body.node_id,
-      clientTimestamp: body.timestamp ?? body.ts,
-      idempotencyKey: body.eventId ?? header(event, 'idempotency-key'),
+      nodeId: nodeId.value,
+      clientTimestamp: timestamp.value,
+      idempotencyKey: eventId.value,
     });
   } catch (error) {
     // Labelled by what it is, not by what it usually is: wrapping the whole use
@@ -135,12 +162,24 @@ exports.handler = async (event) => {
     return response(STATUS.INTERNAL_ERROR, { error: 'Internal Server Error' });
   }
 
-  if (result.duplicate) {
-    // The conditional write found this event already stored — a retried POST.
-    // It is the only evidence idempotency ever fires, and today it can only
-    // happen when the caller supplies a key or a dedup window is configured.
-    console.info('Duplicate event suppressed', { tag: tag.value });
-  }
+  // One structured line per scan, and the reason it is worth its ingestion cost:
+  // without it the only per-request evidence in CloudWatch is the runtime's
+  // REPORT line, which carries a duration and no idea what was decided. A
+  // latency could be attributed to a decision only by matching time windows.
+  // With the event id here and as the row's sort key, a measurement run joins
+  // log to row exactly.
+  //
+  // `duplicate` is the conditional write reporting the event was already stored
+  // — a retried POST that collapsed onto the first. It is the only evidence
+  // idempotency ever fires, and it can only happen when the caller sends a key.
+  console.info('Tag scan', {
+    tag: tag.value,
+    eventId: result.eventId,
+    decision: result.decision,
+    status: result.status,
+    duplicate: result.duplicate,
+    nodeId: nodeId.value,
+  });
 
   return response(result.status, result.body);
 };

@@ -1,7 +1,7 @@
 'use strict';
 
 const { DECISION, statusForDecision } = require('../domain/decisions');
-const { buildEventId } = require('../domain/event');
+const { buildEventId, isOrderedEventId, parseEventEpochMs } = require('../domain/event');
 
 /** What goes on the event row when the tag had no channel to notify at all. */
 const NO_CHANNEL = 'NONE';
@@ -131,17 +131,45 @@ class ScanTagUseCase {
     }
   }
 
-  /** Everything about one scan that does not depend on the decision. */
+  /**
+   * Everything about one scan that does not depend on the decision.
+   *
+   * `epochMs` is when this invocation ran and is what the row records as
+   * `eventTime`. The *event id* deliberately does not use it when the caller
+   * gave us something stable to key on: an id built from the arrival time
+   * changes on every retry, which is exactly how a retried POST used to become
+   * a second row despite carrying an idempotency key.
+   */
   contextFor(request) {
     const timestamp = this.now();
     const epochMs = timestamp.getTime();
+    const clientEpochMs = parseEventEpochMs(request.clientTimestamp, epochMs);
+    const eventId = buildEventId({ epochMs, clientEpochMs, idempotencyKey: request.idempotencyKey });
+
+    if (request.idempotencyKey && !isOrderedEventId(eventId)) {
+      // Two consequences, and the one that does not show up in a query is the
+      // worse of them. The row will not be found by an `eventId BETWEEN` window
+      // over its tag — that much is visible. And because this id carries no
+      // epoch of its own, the key now has to be unique for the life of the tag
+      // rather than for the life of one attempt: a token that repeats, such as a
+      // per-node counter that restarts after a reboot, makes a genuine later
+      // scan collapse onto the older row, and the reader still gets a success.
+      // Either is fixable from the caller's side — send
+      // `<13-digit epoch ms>#<unique>`, or send the reader's timestamp with the
+      // key — which is why this says so instead of quietly compensating.
+      console.warn(
+        'Unordered idempotency key: event falls outside range queries, and a repeated key will silently collapse onto the older row',
+        { tag: request.tag, hasClientTimestamp: Boolean(request.clientTimestamp) },
+      );
+    }
+
     return {
       tagId: request.tag,
       epochMs,
       isoTime: timestamp.toISOString(),
       nodeId: request.nodeId,
       clientTimestamp: request.clientTimestamp,
-      eventId: buildEventId({ epochMs, idempotencyKey: request.idempotencyKey }),
+      eventId,
     };
   }
 
@@ -157,6 +185,10 @@ class ScanTagUseCase {
     return {
       status: statusForDecision(decision),
       duplicate: !written,
+      // Echoed for the handler's log line, not for the HTTP body: correlating a
+      // CloudWatch REPORT with the row it wrote needs the id on both sides.
+      decision,
+      eventId: context.eventId,
       body: {
         ...(ok ? { ok } : {}),
         tag: context.tagId,

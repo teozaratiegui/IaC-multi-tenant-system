@@ -254,14 +254,164 @@ describe('traceability fields', () => {
   });
 
   test('an Idempotency-Key header makes the event id deterministic', async () => {
+    // Two invocations with the real clock, which is the whole point: the id used
+    // to be prefixed with the arrival time, so the retry wrote a second row
+    // however identical the key was. `toContain('scan-7')` alone passed then.
+    const handler = await loadHandler();
+    mockDynamoSend.mockResolvedValue(ALLOWED_TAG);
+    const retried = event({
+      headers: { 'x-api-key': getUnitTestApiKey(), 'Idempotency-Key': 'scan-7' },
+    });
+
+    await handler(retried);
+    await handler(retried);
+
+    const [first, second] = eventWrites().map((write) => write.Item.eventId.S);
+    expect(second).toBe(first);
+    expect(first).toContain('scan-7');
+  });
+
+  test('a reader timestamp keeps that deterministic id range-queryable', async () => {
+    const handler = await loadHandler();
+    mockDynamoSend.mockResolvedValue(ALLOWED_TAG);
+    const retried = event({
+      headers: { 'x-api-key': getUnitTestApiKey(), 'Idempotency-Key': 'scan-7' },
+      body: JSON.stringify({ tag: 'tag-1', timestamp: '2026-09-13T12:00:02Z' }),
+    });
+
+    await handler(retried);
+    await handler(retried);
+
+    const [first, second] = eventWrites().map((write) => write.Item.eventId.S);
+    expect(second).toBe(first);
+    expect(first).toBe('1789300802000#scan-7');
+  });
+
+  test('every scan leaves one line that joins the CloudWatch REPORT to its row', async () => {
+    // Without it the runtime's REPORT gives a duration and no decision, and a
+    // measurement run can only pair them by time window. `console.info` is
+    // already a silenced mock from jest.setup.js, which is what makes the line
+    // assertable here instead of merely noisy everywhere else.
+    const handler = await loadHandler();
+    mockDynamoSend.mockResolvedValue(DENIED_TAG);
+
+    await handler(event({ body: JSON.stringify({ tag: 'tag-1', nodeId: 'node-ab12cd34' }) }));
+
+    expect(console.info).toHaveBeenCalledWith('Tag scan', {
+      tag: 'tag-1',
+      eventId: eventWrites()[0].Item.eventId.S,
+      decision: 'DENY',
+      status: 422,
+      duplicate: false,
+      nodeId: 'node-ab12cd34',
+    });
+  });
+
+  test('an eventId with an implausible epoch is refused before anything is written', async () => {
+    // A reader with no synchronised clock that builds its id out of millis()
+    // sends exactly this. Taken verbatim it would file the scan at the start of
+    // the tag's history and answer 200 — the hole that bounding only
+    // `timestamp` left open.
     const handler = await loadHandler();
     mockDynamoSend.mockResolvedValue(ALLOWED_TAG);
 
-    await handler(
-      event({ headers: { 'x-api-key': getUnitTestApiKey(), 'Idempotency-Key': 'scan-7' } }),
+    const result = await handler(
+      event({ body: JSON.stringify({ tag: 'tag-1', eventId: '0000000006123#x' }) }),
     );
 
-    expect(eventWrites()[0].Item.eventId.S).toContain('scan-7');
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).message).toMatch(/plausible epoch/);
+    expect(eventWrites()).toHaveLength(0);
+  });
+
+  test('an eventId that is not a string is a 400, never a coerced sort key', async () => {
+    const handler = await loadHandler();
+    mockDynamoSend.mockResolvedValue(ALLOWED_TAG);
+
+    const result = await handler(
+      event({ body: JSON.stringify({ tag: 'tag-1', eventId: { a: 1 } }) }),
+    );
+
+    expect(result.statusCode).toBe(400);
+    expect(eventWrites()).toHaveLength(0);
+  });
+
+  test('an over-long eventId is our 400, not DynamoDB\'s 500', async () => {
+    // Past 1024 bytes of sort key PutItem throws ValidationException, the
+    // handler can only call that Internal Server Error, and the gateway spends
+    // its four 5xx retries on a request that was malformed to begin with.
+    const handler = await loadHandler();
+    mockDynamoSend.mockResolvedValue(ALLOWED_TAG);
+
+    const result = await handler(
+      event({ body: JSON.stringify({ tag: 'tag-1', eventId: 'x'.repeat(129) }) }),
+    );
+
+    expect(result.statusCode).toBe(400);
+    expect(eventWrites()).toHaveLength(0);
+  });
+
+  test('a blank eventId means no key, and still gets an ordered id', async () => {
+    const handler = await loadHandler();
+    mockDynamoSend.mockResolvedValue(ALLOWED_TAG);
+
+    const result = await handler(
+      event({ body: JSON.stringify({ tag: 'tag-1', eventId: '   ' }) }),
+    );
+
+    expect(result.statusCode).toBe(200);
+    expect(eventWrites()[0].Item.eventId.S).toMatch(/^\d{13}#.+$/);
+  });
+
+  test('a non-string nodeId is refused, not written as an empty string', async () => {
+    // The SDK coerces a non-string `{ S: value }` to '', so without this the
+    // scan answered 200 and stored an event with no reader on it — the one
+    // field that makes the row traceability rather than "this tag existed".
+    const handler = await loadHandler();
+    mockDynamoSend.mockResolvedValue(ALLOWED_TAG);
+
+    const result = await handler(event({ body: JSON.stringify({ tag: 'tag-1', nodeId: 5 }) }));
+
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).message).toBe('Field `nodeId` must be a string');
+    expect(eventWrites()).toHaveLength(0);
+  });
+
+  test('a non-string timestamp is refused too, and named as itself', async () => {
+    const handler = await loadHandler();
+    mockDynamoSend.mockResolvedValue(ALLOWED_TAG);
+
+    const result = await handler(
+      event({ body: JSON.stringify({ tag: 'tag-1', timestamp: 1789300802000 }) }),
+    );
+
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).message).toBe('Field `timestamp` must be a string');
+    expect(eventWrites()).toHaveLength(0);
+  });
+
+  test('an over-long nodeId is capped, since the endpoint is public', async () => {
+    const handler = await loadHandler();
+    mockDynamoSend.mockResolvedValue(ALLOWED_TAG);
+
+    const result = await handler(
+      event({ body: JSON.stringify({ tag: 'tag-1', nodeId: 'n'.repeat(65) }) }),
+    );
+
+    expect(result.statusCode).toBe(400);
+    expect(eventWrites()).toHaveLength(0);
+  });
+
+  test('a blank nodeId is absent rather than an empty attribute', async () => {
+    const handler = await loadHandler();
+    mockDynamoSend.mockResolvedValue(ALLOWED_TAG);
+
+    const result = await handler(
+      event({ body: JSON.stringify({ tag: 'tag-1', nodeId: '  ', node_id: undefined }) }),
+    );
+
+    expect(result.statusCode).toBe(200);
+    expect(eventWrites()[0].Item.nodeId).toBeUndefined();
   });
 
   test('a duplicate event is reported as success, not as a 500', async () => {

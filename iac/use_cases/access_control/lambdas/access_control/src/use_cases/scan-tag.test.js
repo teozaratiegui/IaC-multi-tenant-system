@@ -39,15 +39,31 @@ function makeMessenger(provider = 'telegram', result = { success: true }) {
   };
 }
 
-function makeUseCase({ tagRepository, eventRepository, messenger, config = {} }) {
+function makeUseCase({ tagRepository, eventRepository, messenger, config = {}, now }) {
   return new ScanTagUseCase({
     tagRepository,
     eventRepository,
     messenger: messenger ?? makeMessenger('none', { success: false }),
     messages: MESSAGES,
     config: { autoRegisterTags: false, ...config },
-    now: () => FIXED_NOW,
+    now: now ?? (() => FIXED_NOW),
   });
+}
+
+/**
+ * A clock that moves, for anything about retries.
+ *
+ * A frozen `now` cannot tell a correct event id from one built out of the
+ * arrival time: both are identical when time does not pass. That is exactly how
+ * the duplicate-suppression bug survived a green test suite.
+ */
+function advancingClock(startIso, stepMs) {
+  let current = Date.parse(startIso);
+  return () => {
+    const at = new Date(current);
+    current += stepMs;
+    return at;
+  };
 }
 
 function recordedEvent(eventRepository) {
@@ -324,18 +340,107 @@ describe('traceability', () => {
     });
   });
 
-  test('an idempotency key produces the same event id on a retry', async () => {
+  test('an idempotency key survives a retry that arrives seconds later', async () => {
+    // The gateway's Retry(total=3) fires after its own 5 s timeout, so the two
+    // invocations of one physical scan are seconds apart. The id used to be
+    // prefixed with the arrival time, which made it differ every time and the
+    // conditional write in the repository collapse nothing. This test used to
+    // pass with that bug because the clock was frozen.
+    const eventRepository = makeEventRepository();
+    // What the conditional write really answers: the first attempt lands, the
+    // second finds the row already there. The default stub says `true` to
+    // everything, and under that a collapsed retry and a second row look alike.
+    eventRepository.record.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const useCase = makeUseCase({
+      tagRepository: makeTagRepository({ tagId: 'E280', allowed: true }),
+      eventRepository,
+      now: advancingClock('2026-09-13T12:00:03.250Z', 5650),
+    });
+
+    const landed = await useCase.execute({ tag: 'E280', idempotencyKey: 'scan-7' });
+    const collapsed = await useCase.execute({ tag: 'E280', idempotencyKey: 'scan-7' });
+
+    const [first, second] = eventRepository.record.mock.calls.map((call) => call[0].eventId);
+    expect(second).toBe(first);
+    expect(landed.duplicate).toBe(false);
+    expect(collapsed.duplicate).toBe(true);
+    // Each *call* still carries its own arrival time — only the identity of the
+    // event is pinned, not its timestamps. There is one row, and it keeps the
+    // first attempt's `eventTime`, because the second write was the one refused.
+    const times = eventRepository.record.mock.calls.map((call) => call[0].epochMs);
+    expect(times[1]).toBeGreaterThan(times[0]);
+  });
+
+  test("with the reader's timestamp the stable id is also range-queryable", async () => {
     const eventRepository = makeEventRepository();
     const useCase = makeUseCase({
       tagRepository: makeTagRepository({ tagId: 'E280', allowed: true }),
       eventRepository,
+      now: advancingClock('2026-09-13T12:00:03.250Z', 5650),
     });
 
-    await useCase.execute({ tag: 'E280', idempotencyKey: 'scan-7' });
-    await useCase.execute({ tag: 'E280', idempotencyKey: 'scan-7' });
+    const scan = { tag: 'E280', idempotencyKey: 'scan-7', clientTimestamp: '2026-09-13T12:00:02Z' };
+    await useCase.execute(scan);
+    await useCase.execute(scan);
 
     const [first, second] = eventRepository.record.mock.calls.map((call) => call[0].eventId);
-    expect(first).toBe(second);
+    expect(second).toBe(first);
+    expect(first).toBe('1789300802000#scan-7');
+  });
+
+  test('a key that cannot be ordered is honoured, and said out loud', async () => {
+    // It still deduplicates; it just falls outside `eventId BETWEEN` windows.
+    // Silence here would mean a tag whose history looks complete and is not.
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const eventRepository = makeEventRepository();
+      await makeUseCase({
+        tagRepository: makeTagRepository({ tagId: 'E280', allowed: true }),
+        eventRepository,
+      }).execute({ tag: 'E280', idempotencyKey: 'scan-7' });
+
+      expect(recordedEvent(eventRepository).eventId).toBe('scan-7');
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('Unordered idempotency key'),
+        expect.objectContaining({ tag: 'E280', hasClientTimestamp: false }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('no key at all stays ordered and stays silent', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const eventRepository = makeEventRepository();
+      await makeUseCase({
+        tagRepository: makeTagRepository({ tagId: 'E280', allowed: true }),
+        eventRepository,
+      }).execute({ tag: 'E280' });
+
+      expect(recordedEvent(eventRepository).eventId).toMatch(/^\d{13}#.+$/);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('the answer carries what the handler needs to log the scan', async () => {
+    // The event id is the only thing that joins a CloudWatch REPORT to the row
+    // it wrote; without it latency can be attributed to a decision only by
+    // matching time windows.
+    const eventRepository = makeEventRepository();
+    const result = await makeUseCase({
+      tagRepository: makeTagRepository({ tagId: 'E280', allowed: true }),
+      eventRepository,
+    }).execute({ tag: 'E280' });
+
+    expect(result.decision).toBe('ALLOW');
+    expect(result.eventId).toBe(recordedEvent(eventRepository).eventId);
+    // And none of it leaks into the HTTP body, which the gateway caches per tag
+    // for 300 s and would replay to unrelated readings.
+    expect(result.body).not.toHaveProperty('eventId');
+    expect(result.body).not.toHaveProperty('decision');
   });
 
   test('a suppressed duplicate is reported to the caller, not turned into an error', async () => {

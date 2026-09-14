@@ -215,6 +215,35 @@ Por qué se cambió:
    **escritura idempotente**: el gateway reintenta un POST hasta 4 veces sin clave
    de idempotencia (hallazgo G3), y hoy eso mete hasta 4 filas por lectura.
 
+> **Forma de la clave de idempotencia.** El prefijo temporal sale del *evento*, nunca
+> del momento en que llega el pedido. Mandá `eventId` (o el header `Idempotency-Key`)
+> como `<13 dígitos de epoch ms>#<único>` y se usa tal cual como SK: determinista y
+> ordenable. Mandá un token opaco junto con `timestamp` y el prefijo se deriva del
+> reloj del lector. Mandá un token opaco solo y el evento se deduplica igual, pero
+> queda fuera de las consultas `eventId BETWEEN` y la función lo avisa por log.
+>
+> **Dos cosas más, que muerden en silencio.** La clave tiene que ser única **por la
+> vida del tag**, no por la vida de un intento: un token que se repite —un contador
+> por nodo que se reinicia en el reboot, por ejemplo— hace que una lectura posterior
+> y genuina colapse sobre la fila vieja, y el lector recibe un éxito igual. Y la
+> clave se valida **antes** de escribir nada: si no es string, si pasa los 128
+> caracteres o si arranca con un epoch implausible (anterior a 2021, o más de un día
+> adelantado respecto del reloj de la función), la respuesta es `400`. Ese último
+> chequeo no es cosmético: sin él, un lector sin reloj sincronizado manda
+> `0000000006123#…`, se le cree, y archiva cada lectura al principio de la historia
+> de su tag — que es exactamente lo que la cota de `timestamp` existe para evitar.
+>
+> Hasta el 2026-09-13 el id se armaba como `<epoch de llegada>#<clave>`, tomando el
+> epoch en **cada** invocación: la misma clave a 5 s de distancia daba dos SK y dos
+> filas. El test unitario no lo detectaba porque congelaba el reloj.
+
+> **`nodeId` y `timestamp` son opcionales, no laxos.** Pueden faltar; si vienen,
+> tienen que ser strings de hasta 64 caracteres o la respuesta es `400`. Nada se
+> coerciona, y ahí está el punto: el SDK de AWS no rechaza un atributo `{ S: <no
+> string> }`, lo escribe como **string vacío**. Un `nodeId` serializado como número
+> se contestaba `200` y quedaba una fila sin lector — el único campo que convierte
+> el evento en trazabilidad, en blanco y sin que nada lo reporte.
+
 El handler escribe además, como atributos normales: `eventTime` (N, epoch ms),
 `eventTimeIso` (S) y `decision` (S: `ALLOW` \| `DENY` \| `UNKNOWN` \| `REGISTERED`).
 Opcionalmente `nodeId` y `clientTimestamp`, cuando el que llama los manda.
@@ -244,7 +273,7 @@ El gateway Fog sólo reenvía al nodo `{200, 201, 204, 404, 422, 500, 503}` y
 | Tag registrado al vuelo | `201` | el gateway lo normaliza a 200 |
 | Tag conocido y **no** permitido | **`422`** | **no 403**: un 403 llega al lector como "el backend se rompió", indistinguible de una caída |
 | Tag desconocido | `404` | |
-| Body inválido o falta `tag` | `400` | el que llama está mal, no el tag |
+| Body inválido, falta o está mal `tag`, `eventId` no es string / pasa los 128 caracteres / arranca con un epoch implausible, o `nodeId` / `timestamp` vienen y no son string (o pasan los 64 caracteres) | `400` | el que llama está mal, no el tag |
 | API key inválida | `401` | ídem |
 
 **El 422 es uno solo, haya o no canal de notificación.** El código desplegado
